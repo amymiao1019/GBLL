@@ -33,4 +33,13 @@ library(ggpubr)
 
 
 
+# Crate matrices lists
+create_matrices_list <- function(n, a, b) {
+  matrix_list <- vector("list", n)
+  for (i in 1:n) {
+    matrix_list[[i]] <- matrix(0, ncol = a, nrow = b)
+  }
+  return(matrix_list)
+}
+
 
