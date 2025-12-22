@@ -95,3 +95,44 @@ lc_kapa_stl_trend_v3 <- lc_kapa_stl_trend_v3 %>%
 lapply(1:3, \(i) read_excel_name_v3[lc_kapa_stl_trend_v3$cluster == i])
 
 
+
+
+4. Clustering Method 3 (based on scaled time trend slopes and scaled seasonal strength)
+lc_kapa_tsfeatures_v3 <- tsfeatures::tsfeatures(lc_kapa_ts_v3, features = c("stl_features"))
+lc_kapa_tsfeatures_v3 <- data.frame(lc_kapa_tsfeatures_v3)
+lc_kapa_tsfeatures_v3_ts_s_seasonal <- lc_kapa_tsfeatures_v3 %>% select(seasonal_strength)
+lc_kapa_tsfeatures_v3_ts_s <- (lc_kapa_tsfeatures_v3_ts_s_seasonal - min(lc_kapa_tsfeatures_v3_ts_s_seasonal)) / (max(lc_kapa_tsfeatures_v3_ts_s_seasonal) - min(lc_kapa_tsfeatures_v3_ts_s_seasonal))
+lc_kapa_tsfeatures_v3_ts_s$trend_slope_scaled <- (lc_kappa_trend_slope[,1] - min(lc_kappa_trend_slope[,1])) / (max(lc_kappa_trend_slope[,1]) - min(lc_kappa_trend_slope[,1]))
+
+
+# Find the optimal no. of cluster
+## Elbow method
+set.seed(1019)
+wcss <- numeric(10)
+for (k in 1:10) {
+  kmeans_model <- kmeans(lc_kapa_tsfeatures_v3_ts_s, centers = k, nstart = 25)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+plot(1:10, wcss, type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Within-cluster sum of squares", main = "Elbow Method")
+
+
+## Silhouette Method
+sil_width <- numeric(10)
+for (k in 2:10) {
+  kmeans_model <- kmeans(lc_kapa_tsfeatures_v3_ts_s, centers = k, nstart = 25)
+  sil <- silhouette(kmeans_model$cluster, dist(lc_kapa_tsfeatures_v3_ts_s))
+  sil_width[k] <- mean(sil[, 3])
+}
+
+plot(2:10, sil_width[-1], type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Average Silhouette Width", main = "Silhouette Method")
+
+
+# Apply the optimal no. of cluster
+lc_kapa_tsfeatures_v3_ts_s_clusters  <- lc_kapa_tsfeatures_v3_ts_s  %>%
+  kmeans(centers = 3, nstart = 25)
+
+# cluster result
+lapply(1:3, \(i) read_excel_name_v3[lc_kapa_tsfeatures_v3_ts_s_clusters$cluster == i])
