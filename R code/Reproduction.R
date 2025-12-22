@@ -299,3 +299,99 @@ for(j in 1:3){
 mean_error_LL_m1 <- apply(simplify2array(flatten(flatten(error_LL_m1_combined))), c(1, 2), mean)
 mean_error_HBY_m1 <- apply(simplify2array(flatten(flatten(error_HBY_m1_combined))), c(1, 2), mean)
 mean_error_GBLL_m1 <- apply(simplify2array(flatten(flatten(error_GBLL_m1_combined))), c(1, 2), mean)
+
+
+
+
+
+
+6. Clustering Method 2 results
+# create lists to store the outputs for each expanding window
+fitted_results_LL_m2_combined <- list()
+error_LL_m2_combined <- list()
+individual_error_LL_m2_combined <- list()
+
+fitted_results_HBY_m2_combined <- list()
+error_HBY_m2_combined <- list()
+individual_error_HBY_m2_combined <- list()
+
+fitted_results_GBLL_m2_combined <- list()
+error_GBLL_m2_combined <- list()
+individual_error_GBLL_m2_combined <- list()
+
+# do 10 times of expanding window for each of the three clusters
+for(j in 1:3){
+  train_mr_list_v3_m2 <- list()
+  test_mr_list_v3_m2 <- list()
+  
+  # create lists to store the outputs for each expanding window
+  fitted_results_LL_m2 <- list()
+  error_LL_m2 <- list()
+  individual_error_LL_m2 <- list()
+
+  fitted_results_HBY_m2 <- list()
+  error_HBY_m2 <- list()
+  individual_error_HBY_m2 <- list()
+
+  fitted_results_GBLL_m2 <- list()
+  error_GBLL_m2 <- list()
+  individual_error_GBLL_m2 <- list()
+  
+  for(i in 1:10){
+    index <- as.numeric(which(lc_kapa_stl_trend_v3$cluster == j))
+    # prepare the data needed
+    for(k in 1:length(index)){
+      matrix <- as.matrix(data_list_v3[[index[k]]][1:training_period[i],3:6])
+      train_mr_list_v3_m2[[k]] <- matrix
+      test_mr_list_v3_m2[[k]] <- as.matrix(data_list_v3[[index[k]]][(training_period[i]+1):(training_period[i]+52),3:6])
+    }
+    
+    flip_indicator <- rep(0, length(index))
+    flip_indicator[index == 1 | index == 18] <- 1
+    which_flip <- which(flip_indicator==1)
+    if(length(which_flip)==0){
+    } else{
+        train_mr_list_v3_m2[[which_flip]] <- 1/train_mr_list_v3_m2[[which_flip]]
+      }
+    train_mr_list_v3_m2 <- lapply(train_mr_list_v3_m2, log)
+    train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+    test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+    
+    # LL
+    fitted_results_LL_m2[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m2, training_period[i],52,1)
+    forecasted_LL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_LL_m2[[i]]$iteration, 1)
+    error_LL_m2[[i]] <- forecasted_LL_m2$error
+    individual_error_LL_m2[[i]] <- mape_h(length(index),4,forecasted_LL_m2$individual_error,12,week_indicator)
+    
+    # HBY
+    fitted_results_HBY_m2[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M2 C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering M2 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
+    forecasted_HBY_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    error_HBY_m2[[i]] <- forecasted_HBY_m2$error
+    individual_error_HBY_m2[[i]] <- mape_h(length(index),4,forecasted_HBY_m2$individual_error,12,week_indicator)
+    
+    # GBLL
+    fitted_results_GBLL_m2[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m2,training_period[i],52,50)
+    forecasted_GBLL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_GBLL_m2[[i]]$iteration, fitted_results_GBLL_m2[[i]]$gamma)
+    error_GBLL_m2[[i]] <- forecasted_GBLL_m2$error
+    individual_error_GBLL_m2[[i]] <- mape_h(length(index),4,forecasted_GBLL_m2$individual_error,12,week_indicator)
+  }
+  
+  # combine the results across 3 clusters
+  fitted_results_LL_m2_combined[[j]] <- fitted_results_LL_m2
+  error_LL_m2_combined[[j]] <- error_LL_m2
+  individual_error_LL_m2_combined[[j]] <- individual_error_LL_m2
+  
+  fitted_results_HBY_m2_combined[[j]] <- fitted_results_HBY_m2
+  error_HBY_m2_combined[[j]] <- error_HBY_m2
+  individual_error_HBY_m2_combined[[j]] <- individual_error_HBY_m2
+  
+  fitted_results_GBLL_m2_combined[[j]] <- fitted_results_GBLL_m2
+  error_GBLL_m2_combined[[j]] <- error_GBLL_m2
+  individual_error_GBLL_m2_combined[[j]] <- individual_error_GBLL_m2
+}
+
+
+# final mean error
+mean_error_LL_m2 <- apply(simplify2array(flatten(flatten(error_LL_m2_combined))), c(1, 2), mean)
+mean_error_HBY_m2 <- apply(simplify2array(flatten(flatten(error_HBY_m2_combined))), c(1, 2), mean)
+mean_error_GBLL_m2 <- apply(simplify2array(flatten(flatten(error_GBLL_m2_combined))), c(1, 2), mean)
