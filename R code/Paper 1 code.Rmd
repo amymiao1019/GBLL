@@ -1,0 +1,4365 @@
+---
+title: "Paper code"
+author: "Ziting Miao"
+date: "2025-07-01"
+output: word_document
+---
+
+
+
+Library all the packages:
+```{r}
+library(ggplot2)
+library(tidyr)
+library(demography)
+library(tseries)
+library(gridExtra)
+library(cowplot)
+library(MortCast)
+library(hwwntest)
+library(tidyverse)
+library(forecast)
+library(lubridate)
+library(lmtest)
+library(dplyr)
+library(MCS)
+library(purrr)
+library(cluster)
+library(readxl)
+library(patchwork)
+library(reshape2)
+library(pheatmap)
+library(maps)
+library(terra)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(wbstats)
+library(ggrepel)
+library(panelvar)
+library(plm)
+library(ggpubr)
+```
+
+
+1. useful functions
+
+# Lee-Carter
+```{r}
+lc <- function(data){
+  ax <- apply(data,2,mean, na.rm=TRUE)
+  residual_sd <- sweep(data, 2, ax)
+  U <- svd(residual_sd)$u
+  V <- svd(residual_sd)$v
+  d <- svd(residual_sd)$d
+  kapa <- d[1]*U[,1]*sum(V[,1])
+  log_sd_fitted <- as.matrix(kapa)%*%t(V[,1]/sum(V[,1]))
+  bx <- t(V[,1]/sum(V[,1]))
+  log_fitted <- sweep(log_sd_fitted,2,-ax)
+  
+  output <- list(ax=ax, kapa=kapa, bx=bx, fitted=log_fitted)
+  return(output)
+}
+```
+
+
+# Create_matrices_list
+```{r}
+create_matrices_list <- function(n, a, b) {
+  matrix_list <- vector("list", n)
+  
+  for (i in 1:n) {
+    matrix_list[[i]] <- matrix(0, ncol = a, nrow = b)
+  }
+  
+  return(matrix_list)
+}
+```
+
+
+
+# create fourier regressor in the forecasting
+```{r}
+fourier_regressor <- function(date, train_time, horizon, K){
+  # create the train and test weekly date
+  date.new <- data.frame(date = date[1:train_time])
+  train_weekly <-  date.new%>%
+    mutate(date=as.Date(date,format='%d/%m/%Y'),
+           ddate=decimal_date(date)%%1)%>%pull(ddate)
+  test_weekly <- decimal_date(date[(train_time+1):(train_time+horizon)])%%1
+  
+ 
+  # create the fourier regressor
+  X_train <- matrix(NA, train_time, 2*K)
+  X_test <- matrix(NA, horizon, 2*K)
+  
+  for(k in 1:K){
+    X_train[,(k-1)*2+1] <- sin(2*pi*k*train_weekly)
+    X_train[,k*2] <- cos(2*pi*k*train_weekly)
+    
+    X_test[,(k-1)*2+1] <- sin(2*pi*k*test_weekly)
+    X_test[,k*2] <- cos(2*pi*k*test_weekly)
+  }
+  
+  output <- list(train=X_train, test=X_test)
+  return(output)
+}
+```
+
+
+# objective function for tuning Gamma
+```{r}
+obj <- function(n_pop, n_age, mortality_rate, fitted_mortality, gamma){
+  obj_sum <- 0
+  if(n_pop == 1){
+    for(j in 1:n_age){
+      fitted <- fitted_mortality[,j]
+      error <- mortality_rate[,j] - gamma * fitted
+      sq_error <- t(error)%*%error
+      obj_sum <- obj_sum + sq_error
+    }
+  } else{
+    for(i in 1:n_pop){
+      for(j in 1:n_age){
+        fitted <- fitted_mortality[[i]][,j]
+        error <- mortality_rate[[i]][,j] - gamma * fitted
+        sq_error <- t(error)%*%error
+        obj_sum <- obj_sum + sq_error
+      }
+    }
+  }
+  
+  
+  return(obj_sum)
+}
+```
+
+
+# HBY
+```{r}
+hby_fit <- function(name, mortality_rate, exposure, order, n_pop, n_age, train_time){
+  # create empty matrices list to store value
+  kt <- create_matrices_list((n_pop+1), order, train_time)
+  ax <- create_matrices_list((n_pop+1), n_age, order)
+  bx <- create_matrices_list((n_pop+1), n_age, order)
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  
+  
+  # fit HBY
+  data <- read.demogdata(mortality_rate, exposure, type = "mortality", label = name, skip = 0, popskip = 0, max.mx=9000)
+  HBY.fit <- coherentfdm(data, order1=order, order2=order)
+  
+  
+  # store the value for the common trend first
+  ax[[1]][1,] <- HBY.fit[["product"]][["basis"]][,1]
+  for(i in 1:order){
+    kt[[1]][,i] <- HBY.fit[["product"]][["coeff"]][,i+1]
+    bx[[1]][i,] <- HBY.fit[["product"]][["basis"]][,i+1]
+  }
+  
+  # store the values for the individual trend
+  for(j in 1:n_pop){
+    ax[[j+1]][1,] <- HBY.fit[["ratio"]][[name[j]]][["basis"]][,1]
+    for(k in 1:order){
+      kt[[j+1]][,k] <- HBY.fit[["ratio"]][[name[j]]][["coeff"]][,k+1]
+      bx[[j+1]][k,] <- HBY.fit[["ratio"]][[name[j]]][["basis"]][,k+1]
+    }
+  }
+  
+  # fitted values
+  for(z in 1:order){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] + ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z]
+      }
+    }
+  }
+  
+  for(j in 1:n_pop){
+    fitted_value[[j]] = exp(fitted_value[[j]])
+  }
+
+  
+  # return the output
+  output <- list(ax=ax, kapa=kt, bx=bx, fitted_value = fitted_value)
+  return(output) 
+}
+```
+
+
+
+
+
+# GBLL
+```{r}
+gbll_original <- function(n_pop, n_age, mortality_rate_list, train_time, horizon, max_iteration){
+  # create the initial values
+  log_residual <- mortality_rate_list
+  iteration <- max_iteration
+  gamma <- c()
+  
+  # create the ax, bx, kt, p_value, p_value indicator, drop indicator matrix list to store values
+  ax <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  bx <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  kt <- create_matrices_list((n_pop+1), max_iteration, train_time)
+  p_value <- create_matrices_list(n_pop, n_age, max_iteration)
+  stop.indicator <- create_matrices_list(n_pop, n_age, max_iteration)
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  
+  
+  for(i in 1:max_iteration){
+    sum.p_value <- 0
+    # set the product and ratio matrices
+    exp_residual <- lapply(log_residual, function(mat) exp(mat))
+    product <- (exp_residual |> reduce(`*`))^(1/n_pop)
+    ratio_list <- mapply(function(mat_list) {mat_list/product}, exp_residual, SIMPLIFY = FALSE)
+    ratio_list_log <- lapply(ratio_list, function(matrix) log(matrix))
+    
+    # now fit the LC on product and each ratio
+    product_fitted <- lc(log(product))
+    ratio_fitted <- lapply(ratio_list_log, lc)
+    
+    # update the new residual after LC and find Gamma
+    new_log_residual <- list()
+    fitted <- list()
+    for(j in 1:n_pop){
+      matrix <- product_fitted$fitted + ratio_fitted[[j]]$fitted
+      fitted[[j]] <- matrix
+    }
+    
+    gamma_value <- optim(par=1, obj, method = "BFGS", n_pop = n_pop, n_age = n_age, mortality_rate = log_residual, fitted_mortality = fitted)$par
+    gamma <- c(gamma, gamma_value)
+    
+    
+    for(j in 1:n_pop){
+      matrix_residual <- log_residual[[j]] - gamma_value* fitted[[j]]
+      new_log_residual[[j]] <- matrix_residual
+    }
+    log_residual <- new_log_residual
+    
+    # store the values of ax, bx and kt
+    ax[[1]][i,] <- product_fitted$ax
+    bx[[1]][i,] <- product_fitted$bx
+    kt[[1]][,i] <- product_fitted$kapa
+    
+    for(k in 1:n_pop){
+      ax[[k+1]][i,] <- ratio_fitted[[k]]$ax
+      bx[[k+1]][i,] <- ratio_fitted[[k]]$bx 
+      kt[[k+1]][,i] <- ratio_fitted[[k]]$kapa
+    }
+    
+    # calculate the p_value
+    for(q in 1:n_pop){
+      for(w in 1:n_age){
+        p_value[[q]][i,w] <- Box.test(log_residual[[q]][,w], lag = horizon, type = "Ljung-Box")$p.value
+        stop.indicator[[q]][i,w] <- ifelse(p_value[[q]][i,w] < 0.05, 0, 1)
+      }
+      sum.p_value <- sum.p_value + rowSums(stop.indicator[[q]])[i]
+    }
+    
+    # update next iteration
+    if(sum.p_value == n_pop * n_age){
+      iteration <- i
+      break
+    }
+  }
+  
+  # fitted values
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z])
+      }
+    }
+  }
+  
+  for(j in 1:n_pop){
+    fitted_value[[j]]=exp(fitted_value[[j]])
+  }
+  
+  
+  # return the output
+  output <- list(ax=ax, kapa=kt, bx=bx, iteration=iteration, gamma=gamma, fitted_value=fitted_value)
+  return(output)
+}
+```
+
+
+# GBLL forecasting
+```{r}
+gbll_forecasting <- function(n_pop, n_age, horizon, fitted_output, train_regressor, test_regressor, flip_indicator, test_mortality, week_indicator, h_months, iteration, gamma){
+  
+  # rename and store the values of ax, bx, kt
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  kt_forecast <- create_matrices_list((n_pop+1), iteration, horizon)
+  
+  # forecast the kt
+  for(d in 1:(n_pop+1)){
+    for(f in 1:iteration){
+      fit.gbll.kt <- auto.arima(kt[[d]][,f], xreg = train_regressor)
+      
+      if(length(coef(fit.gbll.kt)) < 4){
+        fit.gbll.kt <- auto.arima(kt[[d]][,f])
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, h = horizon)$mean
+      } else if(coeftest(fit.gbll.kt)["xreg1", "Pr(>|z|)"] < 0.05 || 
+                coeftest(fit.gbll.kt)["xreg2", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg3", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg4", "Pr(>|z|)"] < 0.05){
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, xreg = test_regressor)$mean
+      } else{
+        fit.gbll.kt <- auto.arima(kt[[d]][,f])
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, h = horizon)$mean
+      }
+    }
+  }
+  
+  # find the log forecasted mortality
+  forecasted_mortality <- create_matrices_list(n_pop, n_age, horizon)
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        forecasted_mortality[[g]][,h] <- forecasted_mortality[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt_forecast[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt_forecast[[g+1]][,z])
+      }
+    }
+  }
+ 
+  
+  # find the actual forecasted mortality
+  for(p in 1:n_pop){
+    if(flip_indicator[p]==0){
+      forecasted_mortality[[p]] <- exp(forecasted_mortality[[p]])
+    } else{
+      forecasted_mortality[[p]] <- 1/exp(forecasted_mortality[[p]])
+    }
+  }
+  
+  
+  # find the forecasting error
+  forecast_error_individual <- create_matrices_list(n_pop, n_age, horizon)
+  rowsum_forecast_error <- create_matrices_list(n_pop, 1, horizon)
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  
+  difference <- Map(`-`, forecasted_mortality, test_mortality)
+  abs_difference <- lapply(difference, function(diff) abs(diff))
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+  
+  rowsum_forecast_error <- lapply(forecast_error_individual, function(error) rowSums(error))
+  
+  for(m in 1:n_pop){
+    for(n in 1:h_months){
+      forecast_error[[m]][n] <- sum(rowsum_forecast_error[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+    }
+  }
+  
+  
+  # return the value
+  output <- list(forecasted_mortality=forecasted_mortality, error=forecast_error, individual_error = forecast_error_individual)
+  return(output)
+}
+```
+
+
+
+# calculate the MAPE for each h and each age group
+```{r}
+mape_h <- function(n_pop, n_age, error_list, h_months, week_indicator){
+  mape_list <- vector("list", n_pop)
+  for(i in 1:n_pop){
+    individual_error <- c()
+    for(h in 1:h_months){
+      mape <- colSums(error_list[[i]][1:week_indicator[h+1],])/week_indicator[h+1]
+      individual_error <- rbind(individual_error, mape)
+    }
+  mape_list[[i]] <- individual_error
+  }
+  
+  return(mape_list)
+}
+```
+
+
+# calculate the mean error for each country
+```{r}
+mean_error_country <- function(error_list){
+  country_split <- lapply(1:30, function(country_idx) {
+    lapply(error_list, function(win) win[[country_idx]])
+  })
+  
+  mean_errors_by_country <- lapply(country_split, function(mats) {
+    mat_array <- simplify2array(mats)
+    matrix(apply(mat_array, 1, mean), ncol = 1)
+  })
+  
+  return(mean_errors_by_country)
+}
+```
+
+
+# R1: MAE
+```{r}
+error_MAE <- function(forecasted_mortality, test_mortality, n_pop, n_age, horizon, h_months, week_indicator){
+  forecast_error_individual <- create_matrices_list(n_pop, n_age, horizon)
+  rowsum_forecast_error <- create_matrices_list(n_pop, 1, horizon)
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  
+  difference <- Map(`-`, forecasted_mortality, test_mortality)
+  abs_difference <- lapply(difference, function(diff) abs(diff))
+  rowsum_forecast_error <- lapply(abs_difference, function(error) rowSums(error))
+  
+  for(m in 1:n_pop){
+    for(n in 1:h_months){
+      forecast_error[[m]][n] <- sum(rowsum_forecast_error[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+    }
+  }
+  
+  return(forecast_error)
+}
+```
+
+
+# R1: MASE
+```{r}
+mean_mase <- function(forecast_list, historical, week_indicator, horizon) {
+  n_windows <- length(forecast_list)        # e.g. 10 expanding windows
+  n_pop <- length(forecast_list[[1]])       # e.g. 30 countries
+  n_age <- ncol(forecast_list[[1]][[1]])    # e.g. 4 age groups
+  h <- nrow(forecast_list[[1]][[1]])        # e.g. 52 weeks
+  
+  n_months <- length(week_indicator) - 1
+  mase_month_age <- matrix(0, nrow = n_months, ncol = n_age)
+  count_valid <- matrix(0, nrow = n_months, ncol = n_age)
+  
+  # Loop over all windows and countries
+  for (w in seq_len(n_windows)) {
+    for (i in seq_len(n_pop)) {
+      fc_mat <- forecast_list[[w]][[i]]
+      actual_list <- lapply(historical, function(x) as.matrix(x[(training_period[w]+1):(training_period[w]+52),]))
+      act_mat <- actual_list[[i]]
+      hist_list <- lapply(historical, function(x) as.matrix(x[1:training_period[w],]))
+      hist_mat <- hist_list[[i]]
+      
+      for (a in seq_len(n_age)) {
+        hist_series <- hist_mat[, a]
+        scale <- mean(abs(hist_series[(horizon + 1):length(hist_series)] -
+                          hist_series[1:(length(hist_series) - horizon)]), na.rm = TRUE)
+ 
+        # Loop over months
+        for (h_idx in 1:n_months) {
+          end_wk <- week_indicator[h_idx + 1]
+          mae_h <- mean(abs(fc_mat[1:end_wk, a] -
+                            act_mat[1:end_wk, a]), na.rm = TRUE)
+          
+          mase_month_age[h_idx, a] <- mase_month_age[h_idx, a] + (mae_h / scale)
+          count_valid[h_idx, a] <- count_valid[h_idx, a] + 1
+        }
+      }
+    }
+  }
+  
+  # Average across countries × windows
+  mase_month_age <- mase_month_age / count_valid
+  rownames(mase_month_age) <- paste0("Month_", seq_len(n_months))
+  colnames(mase_month_age) <- paste0("AgeGroup_", seq_len(n_age))
+  
+  return(mase_month_age)
+}
+```
+
+
+# R1: SARIMA
+```{r}
+gbll_forecasting_SARIMA <- function(n_pop, n_age, horizon, fitted_output, flip_indicator, test_mortality, week_indicator, h_months, iteration, gamma){
+  
+  # rename and store the values of ax, bx, kt
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  kt_forecast <- create_matrices_list((n_pop+1), iteration, horizon)
+  
+  # forecast the kt
+  for(d in 1:(n_pop+1)){
+    for(f in 1:iteration){
+      fit.kt <- auto.arima(ts(kt[[d]][,f], frequency = horizon), seasonal = TRUE, max.p = 2, max.q = 2, max.P = 1, max.Q = 1, max.d=1, max.D=1, stepwise = TRUE, approximation = TRUE)
+      kt_forecast[[d]][,f] <- forecast(fit.kt, h = horizon)$mean
+    }
+  }
+  
+  # find the log forecasted mortality
+  forecasted_mortality <- create_matrices_list(n_pop, n_age, horizon)
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        forecasted_mortality[[g]][,h] <- forecasted_mortality[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt_forecast[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt_forecast[[g+1]][,z])
+      }
+    }
+  }
+ 
+  
+  # find the actual forecasted mortality
+  for(p in 1:n_pop){
+    if(flip_indicator[p]==0){
+      forecasted_mortality[[p]] <- exp(forecasted_mortality[[p]])
+    } else{
+      forecasted_mortality[[p]] <- 1/exp(forecasted_mortality[[p]])
+    }
+  }
+  
+  
+  # find the forecasting error
+  forecast_error_individual <- create_matrices_list(n_pop, n_age, horizon)
+  rowsum_forecast_error <- create_matrices_list(n_pop, 1, horizon)
+  rowsum_mae <- create_matrices_list(n_pop, 1, horizon)
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  forecast_mae <- create_matrices_list(n_pop, 1, h_months)
+  
+  difference <- Map(`-`, forecasted_mortality, test_mortality)
+  abs_difference <- lapply(difference, function(diff) abs(diff))
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+  
+  rowsum_forecast_error <- lapply(forecast_error_individual, function(error) rowSums(error))
+  rowsum_mae <- lapply(abs_difference, function(error) rowSums(error))
+  
+  for(m in 1:n_pop){
+    for(n in 1:h_months){
+      forecast_error[[m]][n] <- sum(rowsum_forecast_error[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+      forecast_mae[[m]][n] <- sum(rowsum_mae[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+    }
+  }
+  
+  
+  # return the value
+  output <- list(forecasted_mortality=forecasted_mortality, error=forecast_error, individual_error = forecast_error_individual, mae=forecast_mae)
+  return(output)
+}
+```
+
+
+2. data preparation (all population size > 200M)
+# initial data preparation
+```{r}
+date <- as.Date("2015-01-08") + 7*seq(0,52*5-1,1)
+week_indicator <- c(0,4,9,13,17,22,26,30,35,39,43,48,52)
+
+read_excel_name_v3 <- c("Australia", "Austria", "Belgium", "Bulgaria", "Canada", "Croatia", "Czech Republic", "Denmark", "England and Wales", "Finland", "France", "Germany", "Greece", "Hungary", "Italy", "Lithuania", "Netherlands", "New Zealand", "Norway", "Poland", "Portugal", "Scotland", "Slovakia", "Slovenia", "South Korea", "Spain", "Sweden", "Switzerland", "Taiwan", "USA")
+
+
+# List all Excel files in the directory
+excel_files_v3 <- list.files("STMF dataset updated v3", pattern = "\\.xlsx$", full.names = TRUE)
+
+# Read each Excel file into a list of data frames
+data_list_v3 <- purrr::map(excel_files_v3, ~ readxl::read_excel(.x))
+
+# Optionally, name the list elements with the file names
+names(data_list_v3) <- basename(excel_files_v3)
+
+# for HBY names
+name_HBY_v3 <- c("australia", "austria", "belgium", "bulgaria", "canada", "croatia", "czechrepublic", "denmark", "englandandwales", "finland", "france", "germany", "greece", "hungary", "italy", "lithuania", "netherlands", "newzealand", "norway", "poland", "portugal", "scotland", "slovakia", "slovenia", "southkorea", "spain", "sweden", "switzerland", "taiwan", "usa")
+
+# for Label names
+name_country_code_v3 <- c("AUS", "AUT", "BEL", "BGR", "CAN", "HRV", "CZE", "DNK", "ENW", "FIN", "FRA", "DEU", "GRC", "HUN", "ITA", "LTU", "NLD", "NZL", "NOR", "POL", "PRT", "SCT", "SVK", "SVN", "KOR", "ESP", "SWE", "CHE", "TWN", "USA")
+```
+
+
+# Draw the ggplot for the raw mortality rate
+```{r}
+# Combine matrices into a single data frame with country labels
+country_df <- bind_rows(lapply(1:length(read_excel_name_v3), function(i) {
+  country_df <- data_list_v3[[i]]
+  country_df$country <- read_excel_name_v3[i]  # Add country name
+  country_df$date <- date
+  return(country_df)
+}), .id = "id")
+
+# Remove the unnecessary id column
+country_df <- country_df %>% select(-id)
+
+
+
+## Draw for 15-64
+plot_1 <- ggplot(country_df, aes(x = date, y = `15-64`, color = country)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       y = "Moratlity rate",
+       color = "Country",
+       subtitle = "15-64 years old") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )+
+  theme(axis.title.x = element_text(size = 14),  # x-axis label
+    axis.title.y = element_text(size = 14),  # y-axis label
+    axis.text.x = element_text(size = 12),   # x-axis ticks
+    axis.text.y = element_text(size = 12),
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "none")
+
+
+## Draw for 65-74
+plot_2 <- ggplot(country_df, aes(x = date, y = `65-74`, color = country)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       y = "Moratlity rate",
+       color = "Country",
+       subtitle = "65-74 years old") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )+
+  theme(axis.title.x = element_text(size = 14),  # x-axis label
+    axis.title.y = element_text(size = 14),  # y-axis label
+    axis.text.x = element_text(size = 12),   # x-axis ticks
+    axis.text.y = element_text(size = 12),
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "none")
+
+## Draw for 75-84
+plot_3 <- ggplot(country_df, aes(x = date, y = `75-84`, color = country)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       y = "Moratlity rate",
+       color = "Country",
+       subtitle = "75-84 years old") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )+
+  theme(axis.title.x = element_text(size = 14),  # x-axis label
+    axis.title.y = element_text(size = 14),  # y-axis label
+    axis.text.x = element_text(size = 12),   # x-axis ticks
+    axis.text.y = element_text(size = 12),
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "none")
+
+
+## Draw for 85+
+plot_4a <- ggplot(country_df, aes(x = date, y = `85+`, color = country)) +
+  geom_line() +  # Draw lines for each country 
+  labs(x = "Date",
+       y = "Mortality rate",
+       color = "Country",
+       subtitle = "85+ years old") +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") + theme(axis.title.x = element_text(size = 14),  # x-axis label
+    axis.title.y = element_text(size = 14),  # y-axis label
+    axis.text.x = element_text(size = 12),   # x-axis ticks
+    axis.text.y = element_text(size = 12),   # y-axis ticks
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(size = 14),   # Legend title size
+    legend.text = element_text(size = 12)) + guides(color = guide_legend(ncol = 10)) + guides(linetype = "none", shape = "none")
+
+
+plot_4 <- plot_4a + theme(legend.position = "none")
+
+
+
+## combine all the plots together
+plot_66 <- grid.arrange(plot_1, plot_2, plot_3, plot_4, ggpubr::get_legend(plot_4a),
+  ncol = 2, nrow = 3, heights=c(4.5,4.5,1),
+  layout_matrix = rbind(c(1,2), c(3,4), c(5,5))
+)
+ggsave("data.pdf", plot = plot_66, width = 15, height = 9, dpi = 300)
+```
+
+
+
+
+
+# draw for AUS, Italy, UK & USA
+```{r}
+four_country <- country_df %>% filter(country %in% c('Australia', 'Italy', 'England and Wales', 'USA'))
+  custom_colors <- c(
+  "USA" = "#2ca02c",        
+  "Australia" = "#1f77b4",
+  "England and Wales" = "grey45", 
+  "Italy" = "violetred1" 
+)
+  
+## Draw for 15-64
+plot_5 <- ggplot(four_country, aes(x = date, y = `15-64`, color = country)) +
+  geom_line(size = 1) +  # Thicker lines (default is ~0.5)
+  labs(x = "Date",
+       y = "Mortality rate",
+       color = "Country",
+       subtitle = "15-64 years old") +
+  scale_color_manual(values = custom_colors) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  ) +
+  theme(
+    axis.title.x = element_text(size = 16),  # x-axis label
+    axis.title.y = element_text(size = 16),  # y-axis label
+    axis.text.x = element_text(size = 14),   # x-axis ticks
+    axis.text.y = element_text(size = 14),   # y-axis ticks
+    legend.position = "none",
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5)
+  )
+
+
+## Draw for 65-74
+plot_6 <- ggplot(four_country, aes(x = date, y = `65-74`, color = country)) +
+  geom_line(size = 1) +  # Draw lines for each country
+  labs(x = "Date",
+       y = "Mortality rate",
+       color = "Country",
+       subtitle = "15-64 years old") +
+  scale_color_manual(values = custom_colors) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )+
+  theme(axis.title.x = element_text(size = 16),  # x-axis label
+    axis.title.y = element_text(size = 16),  # y-axis label
+    axis.text.x = element_text(size = 14),   # x-axis ticks
+    axis.text.y = element_text(size = 14),   # y-axis ticks
+    legend.position = "none",
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5))
+
+
+## Draw for 75-84
+plot_7 <- ggplot(four_country, aes(x = date, y = `75-84`, color = country)) +
+  geom_line(size = 1) +  # Draw lines for each country
+  labs(x = "Date",
+       y = "Mortality rate",
+       color = "Country",
+       subtitle = "15-64 years old") +
+  scale_color_manual(values = custom_colors) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )+
+  theme(axis.title.x = element_text(size = 16),  # x-axis label
+    axis.title.y = element_text(size = 16),  # y-axis label
+    axis.text.x = element_text(size = 14),   # x-axis ticks
+    axis.text.y = element_text(size = 14),   # y-axis ticks
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.position = "none")
+
+
+## Draw for 85+
+plot_8a <- ggplot(four_country, aes(x = date, y = `85+`, color = country)) +
+  geom_line(size = 1) +  # Draw lines for each country 
+  labs(x = "Date",
+       y = "Mortality rate",
+       color = "Country",
+       subtitle = "15-64 years old") +
+  scale_color_manual(values = custom_colors) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") + theme(axis.title.x = element_text(size = 16),  # x-axis label
+    axis.title.y = element_text(size = 16),  # y-axis label
+    axis.text.x = element_text(size = 14),   # x-axis ticks
+    axis.text.y = element_text(size = 14),   # y-axis ticks
+    legend.position = "bottom",
+    plot.subtitle = element_text(size = 12, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 16),   # Legend title size
+    legend.text = element_text(size = 14)) + guides(color = guide_legend(ncol = 5)) + ylim(0.1, 0.34)
+
+
+plot_8 <- plot_8a + theme(legend.position = "none")
+
+## combine all the plots together
+data_plot_2 <- plot_grid(plot_5, plot_6, plot_7, plot_8, ncol = 2, nrow = 2)
+plot_62 <- grid.arrange(plot_5, plot_6, plot_7, plot_8, ggpubr::get_legend(plot_8a),
+  ncol = 2, nrow = 3, heights=c(4.5,4.5,1),
+  layout_matrix = rbind(c(1,2), c(3,4), c(5,5))
+)
+ggsave("4_country_data.pdf", plot = plot_62, width = 15, height = 7, dpi = 300)
+```
+
+
+
+
+2. No. of clusters = 1
+# Preparing data
+```{r}
+flip_indicator_whole_v3 <- c(1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0)
+mr_list_v3 <- list()
+
+for(i in 1:length(read_excel_name_v3)){
+  matrix <- data_list_v3[[i]][,3:6]
+  mr_list_v3[[i]] <- matrix
+}
+```
+
+
+
+# do LL, HBY and GBLL for 10 times
+```{r}
+# create lists to store the outputs for each expanding window
+fitted_results_LL <- list()
+error_LL <- list()
+individual_error_LL <- list()
+error_LL_MAE <- list()
+forecasted_mr_LL <- list()
+
+fitted_results_HBY <- list()
+error_HBY <- list()
+individual_error_HBY <- list()
+error_HBY_MAE <- list()
+forecasted_mr_HBY <- list()
+
+fitted_results_GBLL <- list()
+error_GBLL <- list()
+individual_error_GBLL <- list()
+error_GBLL_MAE <- list()
+forecasted_mr_GBLL <- list()
+
+# do 10 times of expanding window
+training_period <- 208-week_indicator[1:10]
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  # LL
+  fitted_results_LL[[i]] <- gbll_original(length(read_excel_name_v3), 4, train_mr_list_v3, training_period[i],52,1)
+  forecasted_LL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_LL[[i]]$iteration, 1)
+  error_LL[[i]] <- forecasted_LL$error
+  individual_error_LL[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_LL$individual_error,12,week_indicator)
+  error_LL_MAE[[i]] <- error_MAE(forecasted_LL$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_LL[[i]] <- forecasted_LL$forecasted_mortality
+  
+  # HBY
+  fitted_results_HBY[[i]] <- hby_fit(name_HBY_v3, paste0("30 countries whole MR - EW", i-1, ".txt"), paste0("30 countries whole Exposure - EW", i-1, ".txt"), 6, length(read_excel_name_v3), 4, training_period[i])
+  forecasted_HBY <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_HBY[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, 6, c(1,1,1,1,1,1))
+  error_HBY[[i]] <- forecasted_HBY$error
+  individual_error_HBY[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_HBY$individual_error,12,week_indicator)
+  error_HBY_MAE[[i]] <- error_MAE(forecasted_HBY$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_HBY[[i]] <- forecasted_HBY$forecasted_mortality
+  
+  #GBLL
+  fitted_results_GBLL[[i]] <- gbll_original(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
+  forecasted_GBLL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_GBLL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL[[i]]$iteration, fitted_results_GBLL[[i]]$gamma)
+  error_GBLL[[i]] <- forecasted_GBLL$error
+  individual_error_GBLL[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL$individual_error,12,week_indicator)
+  error_GBLL_MAE[[i]] <- error_MAE(forecasted_GBLL$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_GBLL[[i]] <- forecasted_GBLL$forecasted_mortality
+}
+
+
+
+
+# Final mean error
+mean_error_LL <- Reduce("+", unlist(error_LL, recursive = FALSE)) / (10*30)
+mean_error_HBY <- Reduce("+", unlist(error_HBY, recursive = FALSE)) / (10*30)
+mean_error_GBLL <- Reduce("+", unlist(error_GBLL, recursive = FALSE)) / (10*30)
+```
+
+
+
+
+# R1: fitting performance
+```{r}
+fitting_performance <- function(n_pop, n_age, fitting_output, iteration, train_time, flip_indicator){
+  ax <- fitting_output$ax
+  bx <- fitting_output$bx
+  kt <- fitting_output$kapa
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  gamma <- fitting_output$gamma
+  
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z])
+      }
+    }
+  }
+  
+  for(p in 1:n_pop){
+    if(flip_indicator[p]==0){
+      fitted_value[[p]] <- exp(fitted_value[[p]])
+    } else{
+      fitted_value[[p]] <- 1/exp(fitted_value[[p]])
+    }
+  }
+  
+  return(fitted_value)
+}
+```
+
+
+```{r}
+actual <- lapply(mr_list_v3, function(x) as.matrix(x[1:208,]))
+  
+GBLL_fitting_1 <- fitting_performance(30,4,fitted_results_GBLL[[1]],1,208,flip_indicator_whole_v3)
+GBLL_fitting_50 <- fitting_performance(30,4,fitted_results_GBLL[[1]],50,208,flip_indicator_whole_v3)
+age_groups <- c("15-64 years old", "65-74 years old", "75-84 years old", "85+ years old")
+
+
+# store SSE or deviance
+SSE <- numeric(fitted_results_GBLL[[1]]$iteration)
+for (z in 1:fitted_results_GBLL[[1]]$iteration) {
+  fit_z <- fitting_performance(30,4,fitted_results_GBLL[[1]],z,208,flip_indicator_whole_v3)
+  SSE[z] <- sum(unlist(Map(function(y, yhat) (y - yhat)^2, actual, fit_z)))
+}
+
+delta_R2 <- (SSE[-length(SSE)] - SSE[-1]) / SSE[1]
+cum_R2   <- (SSE[1] - SSE[-1]) / SSE[1]
+
+df_long <- data.frame(
+  iteration = rep(1:length(delta_R2), 2),
+  R2        = c(delta_R2, cum_R2),
+  type      = factor(
+    rep(c("Marginal R²", "Cumulative R²"), each = length(delta_R2)),
+    levels = c("Marginal R²", "Cumulative R²")
+  )
+)
+
+plot_71 <- ggplot(df_long, aes(x = iteration, y = R2, colour = type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_colour_manual(
+    values = c(
+      "Marginal R²" = "#1F78B4",      # blue
+      "Cumulative R²" = "orange"  # red
+    ),
+    name = ""
+  ) +
+  labs(
+    x = "Iteration",
+    y = "Proportion of variation explained",
+    title = "Marginal and cumulative explained variation by iteration"
+  ) +
+theme(legend.position = "bottom",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+ggsave("fitting_R2.pdf", plot = plot_71, width = 15, height = 8, dpi = 300)
+
+
+
+
+# look at Denmark (8th) and Slovakia (23rd)
+SSE_LL <- numeric(30)
+SSE_HBY <- numeric(30)
+SSE_GBLL <- numeric(30)
+for (p in 1:30) {
+  SSE_LL[p] <- sum((actual[[p]] - fitted_results_LL[[1]]$fitted_value[[p]])^2)
+  SSE_HBY[p] <- sum((actual[[p]] - fitted_results_HBY[[1]]$fitted_value[[p]])^2)
+  SSE_GBLL[p] <- sum((actual[[p]] - fitted_results_GBLL[[1]]$fitted_value[[p]])^2)
+}
+
+
+
+## Denmark
+combined_DNK <- array(NA, dim = c(208, 4, 4)) # 208 rows × 4 ages × 4 series
+colnames(combined_DNK) <- paste0("Age", 1:4)
+
+# assign series: 1 = actual, 2 = LL, 3 = HBY, 4 = GBLL
+combined_DNK[, , 1] <- log(actual[[8]])
+combined_DNK[, , 2] <- log(fitted_results_LL[[1]]$fitted_value[[8]])
+combined_DNK[, , 3] <- log(fitted_results_HBY[[1]]$fitted_value[[8]])
+combined_DNK[, , 4] <- log(fitted_results_GBLL[[1]]$fitted_value[[8]])
+
+series_names <- c("Actual", "LL", "HBY", "GBLL")
+
+# convert to long data.frame
+df_list_DNK <- list()
+for(age in 1:4){
+  df_DNK <- data.frame(
+    Time = date[1:208],
+    Series = rep(series_names, each = 208),
+    Value = c(
+      combined_DNK[, age, 1],
+      combined_DNK[, age, 2],
+      combined_DNK[, age, 3],
+      combined_DNK[, age, 4]
+    ),
+    AgeGroup = age_groups[age]
+  )
+  df_list_DNK[[age]] <- df_DNK
+}
+
+df_long_DNK <- do.call(rbind, df_list_DNK)
+
+
+plot_72 <- ggplot(df_long_DNK, aes(x = Time, y = Value, colour = Series)) +
+  geom_line(linewidth = 1) +
+  geom_point(
+    data = subset(df_long_DNK, Series == "Actual"),
+    size = 1.5, alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(df_long_DNK, Series %in% c("LL", "HBY", "GBLL")),
+    size = 0.8, alpha = 0.6
+  ) +
+  facet_wrap(~AgeGroup, ncol = 2, scales = "free_y") +
+  scale_colour_manual(
+    values = c(
+      "Actual" = "black",  # blue
+      "LL"     = "blue",  # red
+      "HBY"    = "#33A02C",  # green
+      "GBLL"   = "#FF7F00"   # orange
+    )) + 
+  scale_linetype_manual(values = c(
+    "Actual" = "solid",
+    "LL"     = "dashed",
+    "HBY"    = "dotted",
+    "GBLL"   = "dotdash")) + 
+  labs(
+    x = "Date",
+    y = "log(mortality rate)",
+    title = "Fitted vs Actual Mortality on a log scale - Denmark"
+  ) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))
+ggsave("Denmark_fitting.pdf", plot = plot_72, width = 15, height = 8, dpi = 300)
+
+
+
+
+
+## Slovakia
+combined_SVK <- array(NA, dim = c(208, 4, 4)) # 208 rows × 4 ages × 4 series
+colnames(combined_SVK) <- paste0("Age", 1:4)
+
+# assign series: 1 = actual, 2 = LL, 3 = HBY, 4 = GBLL
+combined_SVK[, , 1] <- log(actual[[23]])
+combined_SVK[, , 2] <- log(fitted_results_LL[[1]]$fitted_value[[23]])
+combined_SVK[, , 3] <- log(fitted_results_HBY[[1]]$fitted_value[[23]])
+combined_SVK[, , 4] <- log(fitted_results_GBLL[[1]]$fitted_value[[23]])
+
+# convert to long data.frame
+df_list_SVK <- list()
+for(age in 1:4){
+  df_SVK <- data.frame(
+    Time = date[1:208],
+    Series = rep(series_names, each = 208),
+    Value = c(
+      combined_SVK[, age, 1],
+      combined_SVK[, age, 2],
+      combined_SVK[, age, 3],
+      combined_SVK[, age, 4]
+    ),
+    AgeGroup = age_groups[age]
+  )
+  df_list_SVK[[age]] <- df_SVK
+}
+
+df_long_SVK <- do.call(rbind, df_list_SVK)
+
+
+plot_73 <- ggplot(df_long_SVK, aes(x = Time, y = Value, colour = Series)) +
+  geom_line(linewidth = 1) +
+  geom_point(
+    data = subset(df_long_SVK, Series == "Actual"),
+    size = 1.5, alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(df_long_SVK, Series %in% c("LL", "HBY", "GBLL")),
+    size = 0.8, alpha = 0.6
+  ) +
+  facet_wrap(~AgeGroup, ncol = 2, scales = "free_y") +
+  scale_colour_manual(
+    values = c(
+      "Actual" = "black",  # blue
+      "LL"     = "blue",  # red
+      "HBY"    = "#33A02C",  # green
+      "GBLL"   = "#FF7F00"   # orange
+    )) + 
+  scale_linetype_manual(values = c(
+    "Actual" = "solid",
+    "LL"     = "dashed",
+    "HBY"    = "dotted",
+    "GBLL"   = "dotdash")) + 
+  labs(
+    x = "Date",
+    y = "log(mortality rate)",
+    title = "Fitted vs Actual Mortality on a log scale - Slovakia"
+  ) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))
+ggsave("Slovakia_fitting.pdf", plot = plot_73, width = 15, height = 8, dpi = 300)
+```
+
+
+
+# Forecasting plots
+```{r}
+actual_test <- lapply(mr_list_v3, function(x) as.matrix(x[209:260,]))
+
+
+## Spain
+combined_ESP <- array(NA, dim = c(52, 4, 4)) # 208 rows × 4 ages × 4 series
+colnames(combined_ESP) <- paste0("Age", 1:4)
+
+# assign series: 1 = actual, 2 = LL, 3 = HBY, 4 = GBLL
+combined_ESP[, , 1] <- (actual_test[[26]])
+combined_ESP[, , 2] <- (forecasted_mr_LL[[1]][[26]])
+combined_ESP[, , 3] <- (forecasted_mr_HBY[[1]][[26]])
+combined_ESP[, , 4] <- (forecasted_mr_GBLL[[1]][[26]])
+
+# convert to long data.frame
+df_list_ESP <- list()
+for(age in 1:4){
+  df_ESP <- data.frame(
+    Time = date[209:260],
+    Series = rep(series_names, each = 52),
+    Value = c(
+      combined_ESP[, age, 1],
+      combined_ESP[, age, 2],
+      combined_ESP[, age, 3],
+      combined_ESP[, age, 4]
+    ),
+    AgeGroup = age_groups[age]
+  )
+  df_list_ESP[[age]] <- df_ESP
+}
+
+df_long_ESP <- do.call(rbind, df_list_ESP)
+
+
+plot_74 <- ggplot(df_long_ESP, aes(x = Time, y = Value, colour = Series)) +
+  geom_line(linewidth = 1) +
+  geom_point(
+    data = subset(df_long_ESP, Series == "Actual"),
+    size = 1.5, alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(df_long_ESP, Series %in% c("LL", "HBY", "GBLL")),
+    size = 0.8, alpha = 0.6
+  ) +
+  facet_wrap(~AgeGroup, ncol = 2, scales = "free_y") +
+  scale_colour_manual(
+    values = c(
+      "Actual" = "black",  # blue
+      "LL"     = "blue",  # red
+      "HBY"    = "#33A02C",  # green
+      "GBLL"   = "#FF7F00"   # orange
+    )) + 
+  scale_linetype_manual(values = c(
+    "Actual" = "solid",
+    "LL"     = "dashed",
+    "HBY"    = "dotted",
+    "GBLL"   = "dotdash")) + 
+  labs(
+    x = "Date",
+    y = "log(mortality rate)",
+    title = "Forecasted vs Actual Mortality - Spain"
+  ) +
+  scale_x_date(
+    breaks = as.Date(c("2019-01-01", "2020-01-01")),
+    labels = c("2019", "2020")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))
+ggsave("Spain_forecast.pdf", plot = plot_74, width = 15, height = 8, dpi = 300)
+
+
+
+
+
+
+## Belgium
+combined_BEL <- array(NA, dim = c(52, 4, 4)) # 208 rows × 4 ages × 4 series
+colnames(combined_BEL) <- paste0("Age", 1:4)
+
+# assign series: 1 = actual, 2 = LL, 3 = HBY, 4 = GBLL
+combined_BEL[, , 1] <- (actual_test[[3]])
+combined_BEL[, , 2] <- (forecasted_mr_LL[[1]][[3]])
+combined_BEL[, , 3] <- (forecasted_mr_HBY[[1]][[3]])
+combined_BEL[, , 4] <- (forecasted_mr_GBLL[[1]][[3]])
+
+# convert to long data.frame
+df_list_BEL <- list()
+for(age in 1:4){
+  df_BEL <- data.frame(
+    Time = date[209:260],
+    Series = rep(series_names, each = 52),
+    Value = c(
+      combined_BEL[, age, 1],
+      combined_BEL[, age, 2],
+      combined_BEL[, age, 3],
+      combined_BEL[, age, 4]
+    ),
+    AgeGroup = age_groups[age]
+  )
+  df_list_BEL[[age]] <- df_BEL
+}
+
+df_long_BEL <- do.call(rbind, df_list_BEL)
+
+
+plot_75 <- ggplot(df_long_BEL, aes(x = Time, y = Value, colour = Series)) +
+  geom_line(linewidth = 1) +
+  geom_point(
+    data = subset(df_long_BEL, Series == "Actual"),
+    size = 1.5, alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(df_long_BEL, Series %in% c("LL", "HBY", "GBLL")),
+    size = 0.8, alpha = 0.6
+  ) +
+  facet_wrap(~AgeGroup, ncol = 2, scales = "free_y") +
+  scale_colour_manual(
+    values = c(
+      "Actual" = "black",  # blue
+      "LL"     = "blue",  # red
+      "HBY"    = "#33A02C",  # green
+      "GBLL"   = "#FF7F00"   # orange
+    )) + 
+  scale_linetype_manual(values = c(
+    "Actual" = "solid",
+    "LL"     = "dashed",
+    "HBY"    = "dotted",
+    "GBLL"   = "dotdash")) + 
+  labs(
+    x = "Date",
+    y = "Mortality rate",
+    title = "Forecasted vs Actual Mortality - Belgium"
+  ) +
+  scale_x_date(
+    breaks = as.Date(c("2019-01-01", "2020-01-01")),
+    labels = c("2019", "2020")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))
+ggsave("Belgium_forecast.pdf", plot = plot_75, width = 15, height = 8, dpi = 300)
+
+
+
+
+## New Zealand
+combined_NZL <- array(NA, dim = c(52, 4, 4)) # 208 rows × 4 ages × 4 series
+colnames(combined_NZL) <- paste0("Age", 1:4)
+
+# assign series: 1 = actual, 2 = LL, 3 = HBY, 4 = GBLL
+combined_NZL[, , 1] <- (actual_test[[18]])
+combined_NZL[, , 2] <- (forecasted_mr_LL[[1]][[18]])
+combined_NZL[, , 3] <- (forecasted_mr_HBY[[1]][[18]])
+combined_NZL[, , 4] <- (forecasted_mr_GBLL[[1]][[18]])
+
+# convert to long data.frame
+df_list_NZL <- list()
+for(age in 1:4){
+  df_NZL <- data.frame(
+    Time = date[209:260],
+    Series = rep(series_names, each = 52),
+    Value = c(
+      combined_NZL[, age, 1],
+      combined_NZL[, age, 2],
+      combined_NZL[, age, 3],
+      combined_NZL[, age, 4]
+    ),
+    AgeGroup = age_groups[age]
+  )
+  df_list_NZL[[age]] <- df_NZL
+}
+
+df_long_NZL <- do.call(rbind, df_list_NZL)
+
+
+plot_76 <- ggplot(df_long_NZL, aes(x = Time, y = Value, colour = Series)) +
+  geom_line(linewidth = 1) +
+  geom_point(
+    data = subset(df_long_NZL, Series == "Actual"),
+    size = 1.5, alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(df_long_NZL, Series %in% c("LL", "HBY", "GBLL")),
+    size = 0.8, alpha = 0.6
+  ) +
+  facet_wrap(~AgeGroup, ncol = 2, scales = "free_y") +
+  scale_colour_manual(
+    values = c(
+      "Actual" = "black",  # blue
+      "LL"     = "blue",  # red
+      "HBY"    = "#33A02C",  # green
+      "GBLL"   = "#FF7F00"   # orange
+    )) + 
+  scale_linetype_manual(values = c(
+    "Actual" = "solid",
+    "LL"     = "dashed",
+    "HBY"    = "dotted",
+    "GBLL"   = "dotdash")) + 
+  labs(
+    x = "Date",
+    y = "Mortality rate",
+    title = "Forecasted vs Actual Mortality - New Zealand"
+  ) +
+  scale_x_date(
+    breaks = as.Date(c("2019-01-01", "2020-01-01")),
+    labels = c("2019", "2020")
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))
+ggsave("New_Zealand_forecast.pdf", plot = plot_76, width = 15, height = 8, dpi = 300)
+```
+
+
+
+# R1: Absolute loss function
+```{r}
+# loss function
+obj_abs <- function(n_pop, n_age, mortality_rate, fitted_mortality, gamma){
+  obj_sum <- 0
+  
+  if(n_pop == 1){
+    for(j in 1:n_age){
+      fitted <- fitted_mortality[, j]
+      error <- mortality_rate[, j] - gamma * fitted
+      abs_error <- sum(abs(error))    # use L1 loss
+      obj_sum <- obj_sum + abs_error
+    }
+    
+  } else {
+    for(i in 1:n_pop){
+      for(j in 1:n_age){
+        fitted <- fitted_mortality[[i]][, j]
+        error <- mortality_rate[[i]][, j] - gamma * fitted
+        abs_error <- sum(abs(error))  # use L1 loss
+        obj_sum <- obj_sum + abs_error
+      }
+    }
+  }
+  
+  return(obj_sum)
+}
+
+
+
+
+
+gbll_original_abs_loss_function <- function(n_pop, n_age, mortality_rate_list, train_time, horizon, max_iteration){
+  # create the initial values
+  log_residual <- mortality_rate_list
+  iteration <- max_iteration
+  gamma <- c()
+  
+  # create the ax, bx, kt, p_value, p_value indicator, drop indicator matrix list to store values
+  ax <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  bx <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  kt <- create_matrices_list((n_pop+1), max_iteration, train_time)
+  p_value <- create_matrices_list(n_pop, n_age, max_iteration)
+  stop.indicator <- create_matrices_list(n_pop, n_age, max_iteration)
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  
+  
+  for(i in 1:max_iteration){
+    sum.p_value <- 0
+    # set the product and ratio matrices
+    exp_residual <- lapply(log_residual, function(mat) exp(mat))
+    product <- (exp_residual |> reduce(`*`))^(1/n_pop)
+    ratio_list <- mapply(function(mat_list) {mat_list/product}, exp_residual, SIMPLIFY = FALSE)
+    ratio_list_log <- lapply(ratio_list, function(matrix) log(matrix))
+    
+    # now fit the LC on product and each ratio
+    product_fitted <- lc(log(product))
+    ratio_fitted <- lapply(ratio_list_log, lc)
+    
+    # update the new residual after LC and find Gamma
+    new_log_residual <- list()
+    fitted <- list()
+    for(j in 1:n_pop){
+      matrix <- product_fitted$fitted + ratio_fitted[[j]]$fitted
+      fitted[[j]] <- matrix
+    }
+    
+    gamma_value <- optim(par=1, obj_abs, method = "BFGS", n_pop = n_pop, n_age = n_age, mortality_rate = log_residual, fitted_mortality = fitted)$par
+    gamma <- c(gamma, gamma_value)
+    
+    
+    for(j in 1:n_pop){
+      matrix_residual <- log_residual[[j]] - gamma_value* fitted[[j]]
+      new_log_residual[[j]] <- matrix_residual
+    }
+    log_residual <- new_log_residual
+    
+    # store the values of ax, bx and kt
+    ax[[1]][i,] <- product_fitted$ax
+    bx[[1]][i,] <- product_fitted$bx
+    kt[[1]][,i] <- product_fitted$kapa
+    
+    for(k in 1:n_pop){
+      ax[[k+1]][i,] <- ratio_fitted[[k]]$ax
+      bx[[k+1]][i,] <- ratio_fitted[[k]]$bx 
+      kt[[k+1]][,i] <- ratio_fitted[[k]]$kapa
+    }
+    
+    # calculate the p_value
+    for(q in 1:n_pop){
+      for(w in 1:n_age){
+        p_value[[q]][i,w] <- Box.test(log_residual[[q]][,w], lag = horizon, type = "Ljung-Box")$p.value
+        stop.indicator[[q]][i,w] <- ifelse(p_value[[q]][i,w] < 0.05, 0, 1)
+      }
+      sum.p_value <- sum.p_value + rowSums(stop.indicator[[q]])[i]
+    }
+    
+    # update next iteration
+    if(sum.p_value == n_pop * n_age){
+      iteration <- i
+      break
+    }
+  }
+  
+  # fitted values
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z])
+      }
+    }
+  }
+  
+  for(j in 1:n_pop){
+    fitted_value[[j]]=exp(fitted_value[[j]])
+  }
+  
+  
+  # return the output
+  output <- list(ax=ax, kapa=kt, bx=bx, iteration=iteration, gamma=gamma, fitted_value=fitted_value)
+  return(output)
+}
+```
+
+
+```{r}
+# GBLL
+fitted_results_GBLL_abs_loss <- list()
+error_GBLL_abs_loss <- list()
+individual_error_GBLL_abs_loss <- list()
+forecasted_mr_GBLL_abs_loss <- list()
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  
+  fitted_results_GBLL_abs_loss[[i]] <- gbll_original_abs_loss_function(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
+  
+  forecasted_GBLL_abs_loss <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_GBLL_abs_loss[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL_abs_loss[[i]]$iteration, fitted_results_GBLL_abs_loss[[i]]$gamma)
+  
+  error_GBLL_abs_loss[[i]] <- forecasted_GBLL_abs_loss$error
+  
+  individual_error_GBLL_abs_loss[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL_abs_loss$individual_error,12,week_indicator)
+  
+  forecasted_mr_GBLL_abs_loss[[i]] <- forecasted_GBLL_abs_loss$forecasted_mortality
+}
+
+mean_error_GBLL_abs_loss <- Reduce("+", unlist(error_GBLL_abs_loss, recursive = FALSE)) / (10*30)
+```
+
+
+
+
+# R1: Different stop criteria
+```{r}
+gbll_original_stopping <- function(n_pop, n_age, mortality_rate_list, train_time,
+                          horizon, max_iteration, epsilon = 1e-6) {
+  
+  # initial residuals
+  log_residual <- mortality_rate_list
+  gamma <- c()
+  iteration <- max_iteration
+  
+  # storage
+  ax <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  bx <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  kt <- create_matrices_list((n_pop+1), max_iteration, train_time)
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  loss_vec <- numeric(max_iteration)
+  
+  for(i in 1:max_iteration){
+    exp_residual <- lapply(log_residual, exp)
+    product <- (exp_residual |> reduce(`*`))^(1/n_pop)
+    ratio_list <- mapply(function(mat) mat / product, exp_residual, SIMPLIFY=FALSE)
+    ratio_list_log <- lapply(ratio_list, log)
+    
+    product_fitted <- lc(log(product))
+    ratio_fitted <- lapply(ratio_list_log, lc)
+    
+    fitted <- list()
+    for(j in 1:n_pop){
+      fitted[[j]] <- product_fitted$fitted + ratio_fitted[[j]]$fitted
+    }
+    
+    gamma_value <- optim(
+      par = 1,
+      fn = obj,
+      method = "BFGS",
+      n_pop = n_pop,
+      n_age = n_age,
+      mortality_rate = log_residual,
+      fitted_mortality = fitted
+    )$par
+    
+    gamma <- c(gamma, gamma_value)
+    
+    log_residual <- lapply(1:n_pop, function(j) {
+      log_residual[[j]] - gamma_value * fitted[[j]]
+    })
+    loss_vec[i] <- sum(unlist(log_residual)^2)
+
+    
+    ax[[1]][i,] <- product_fitted$ax
+    bx[[1]][i,] <- product_fitted$bx
+    kt[[1]][,i] <- product_fitted$kapa
+    
+    for(k in 1:n_pop){
+      ax[[k+1]][i,] <- ratio_fitted[[k]]$ax
+      bx[[k+1]][i,] <- ratio_fitted[[k]]$bx
+      kt[[k+1]][,i] <- ratio_fitted[[k]]$kapa
+    }
+    
+    # new stopping criteria
+    if (i > 1) {
+      if (abs(loss_vec[i] - loss_vec[i-1]) < epsilon) {
+        iteration <- i
+        break
+      }
+    }
+  } # end loop
+  
+  
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] +
+          gamma[z] * (ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] +
+                        ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z])
+      }
+    }
+  }
+  
+  fitted_value <- lapply(fitted_value, exp)
+  return(list(
+    ax = ax,
+    kapa = kt,
+    bx = bx,
+    iteration = iteration,
+    gamma = gamma,
+    fitted_value = fitted_value,
+    loss = loss_vec[1:iteration]
+  ))
+}
+```
+
+
+```{r}
+# GBLL
+fitted_results_GBLL_stopping <- list()
+error_GBLL_stopping <- list()
+individual_error_GBLL_stopping <- list()
+forecasted_mr_GBLL_stopping <- list()
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  
+  fitted_results_GBLL_stopping[[i]] <- gbll_original_stopping(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
+  
+  forecasted_GBLL_stopping <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_GBLL_stopping[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL_stopping[[i]]$iteration, fitted_results_GBLL_stopping[[i]]$gamma)
+  
+  error_GBLL_stopping[[i]] <- forecasted_GBLL_stopping$error
+  
+  individual_error_GBLL_stopping[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL_stopping$individual_error,12,week_indicator)
+  
+  forecasted_mr_GBLL_stopping[[i]] <- forecasted_GBLL_stopping$forecasted_mortality
+}
+
+mean_error_GBLL_stopping <- Reduce("+", unlist(error_GBLL_stopping, recursive = FALSE)) / (10*30)
+```
+
+
+
+
+# R1: seasonal adjustment for AUS + NZL
+```{r}
+seasonal_transformation <- function(mat) {
+  col_means <- colMeans(mat)               
+  sweep(mat, 2, 2 * col_means, FUN = function(x, b) b - x)
+}
+
+
+
+gbll_forecasting_seasonal_adjustment <- function(n_pop, n_age, horizon, fitted_output, train_regressor, test_regressor, flip_indicator, test_mortality, week_indicator, h_months, iteration, gamma, historical_mean){
+  
+  # rename and store the values of ax, bx, kt
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  kt_forecast <- create_matrices_list((n_pop+1), iteration, horizon)
+  
+  # forecast the kt
+  for(d in 1:(n_pop+1)){
+    for(f in 1:iteration){
+      fit.gbll.kt <- auto.arima(kt[[d]][,f], xreg = train_regressor)
+      
+      if(length(coef(fit.gbll.kt)) < 4){
+        fit.gbll.kt <- auto.arima(kt[[d]][,f])
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, h = horizon)$mean
+      } else if(coeftest(fit.gbll.kt)["xreg1", "Pr(>|z|)"] < 0.05 || 
+                coeftest(fit.gbll.kt)["xreg2", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg3", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg4", "Pr(>|z|)"] < 0.05){
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, xreg = test_regressor)$mean
+      } else{
+        fit.gbll.kt <- auto.arima(kt[[d]][,f])
+        kt_forecast[[d]][,f] <- forecast(fit.gbll.kt, h = horizon)$mean
+      }
+    }
+  }
+  
+  # find the log forecasted mortality
+  forecasted_mortality <- create_matrices_list(n_pop, n_age, horizon)
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        forecasted_mortality[[g]][,h] <- forecasted_mortality[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt_forecast[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt_forecast[[g+1]][,z])
+      }
+    }
+  }
+ 
+  country_index <- 1
+  # find the actual forecasted mortality
+  for(p in 1:n_pop){
+    if(flip_indicator[p]==0){
+      forecasted_mortality[[p]] <- exp(forecasted_mortality[[p]])
+    } else{
+      forecasted_mortality[[p]] <- sweep(exp(forecasted_mortality[[p]]), 2, 
+                                         2 * colmeans_list[[country_index]], 
+                                         FUN = function(x, b) b - x)
+      country_index <- country_index + 1
+    }
+  }
+  
+  
+  # find the forecasting error
+  forecast_error_individual <- create_matrices_list(n_pop, n_age, horizon)
+  rowsum_forecast_error <- create_matrices_list(n_pop, 1, horizon)
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  
+  difference <- Map(`-`, forecasted_mortality, test_mortality)
+  abs_difference <- lapply(difference, function(diff) abs(diff))
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+  
+  rowsum_forecast_error <- lapply(forecast_error_individual, function(error) rowSums(error))
+  
+  for(m in 1:n_pop){
+    for(n in 1:h_months){
+      forecast_error[[m]][n] <- sum(rowsum_forecast_error[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+    }
+  }
+  
+  
+  # return the value
+  output <- list(forecasted_mortality=forecasted_mortality, error=forecast_error, individual_error = forecast_error_individual)
+  return(output)
+}
+```
+
+
+```{r}
+# GBLL
+fitted_results_GBLL_seasonal_adjustment <- list()
+error_GBLL_seasonal_adjustment <- list()
+individual_error_GBLL_seasonal_adjustment <- list()
+forecasted_mr_GBLL_seasonal_adjustment <- list()
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  
+  colmeans_list <- list(colMeans(train_mr_list_v3[[1]], na.rm = TRUE),
+                        colMeans(train_mr_list_v3[[18]], na.rm = TRUE))
+  train_mr_list_v3[[1]]  <- seasonal_transformation(train_mr_list_v3[[1]])
+  train_mr_list_v3[[18]] <- seasonal_transformation(train_mr_list_v3[[18]])
+  
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  
+  fitted_results_GBLL_seasonal_adjustment[[i]] <- gbll_original(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
+  
+  forecasted_GBLL_seasonal_adjustment <- gbll_forecasting_seasonal_adjustment(length(read_excel_name_v3), 4, 52, fitted_results_GBLL_seasonal_adjustment[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL_seasonal_adjustment[[i]]$iteration, fitted_results_GBLL_seasonal_adjustment[[i]]$gamma, colmeans_list)
+  
+  error_GBLL_seasonal_adjustment[[i]] <- forecasted_GBLL_seasonal_adjustment$error
+  
+  individual_error_GBLL_seasonal_adjustment[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL_seasonal_adjustment$individual_error,12,week_indicator)
+  
+  forecasted_mr_GBLL_seasonal_adjustment[[i]] <- forecasted_GBLL_seasonal_adjustment$forecasted_mortality
+}
+
+mean_error_GBLL_seasonal_adjustment <- Reduce("+", unlist(error_GBLL_seasonal_adjustment, recursive = FALSE)) / (10*30)
+
+
+
+## LL
+fitted_results_LL_seasonal_adjustment <- list()
+error_LL_seasonal_adjustment <- list()
+individual_error_LL_seasonal_adjustment <- list()
+forecasted_mr_LL_seasonal_adjustment <- list()
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  
+  colmeans_list <- list(colMeans(train_mr_list_v3[[1]], na.rm = TRUE),
+                        colMeans(train_mr_list_v3[[18]], na.rm = TRUE))
+  train_mr_list_v3[[1]]  <- seasonal_transformation(train_mr_list_v3[[1]])
+  train_mr_list_v3[[18]] <- seasonal_transformation(train_mr_list_v3[[18]])
+  
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  
+  fitted_results_LL_seasonal_adjustment[[i]] <- gbll_original(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,1)
+  
+  forecasted_LL_seasonal_adjustment <- gbll_forecasting_seasonal_adjustment(length(read_excel_name_v3), 4, 52, fitted_results_LL_seasonal_adjustment[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, 1, fitted_results_LL_seasonal_adjustment[[i]]$gamma, colmeans_list)
+  
+  error_LL_seasonal_adjustment[[i]] <- forecasted_LL_seasonal_adjustment$error
+  
+  individual_error_LL_seasonal_adjustment[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_LL_seasonal_adjustment$individual_error,12,week_indicator)
+  
+  forecasted_mr_LL_seasonal_adjustment[[i]] <- forecasted_LL_seasonal_adjustment$forecasted_mortality
+}
+
+mean_error_LL_seasonal_adjustment <- Reduce("+", unlist(error_LL_seasonal_adjustment, recursive = FALSE))/(10*30)
+
+
+
+
+## HBY
+fitted_results_HBY_seasonal_adjustment <- list()
+error_HBY_seasonal_adjustment <- list()
+individual_error_HBY_seasonal_adjustment <- list()
+forecasted_mr_HBY_seasonal_adjustment <- list()
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  
+  colmeans_list <- list(colMeans(train_mr_list_v3[[1]], na.rm = TRUE),
+                        colMeans(train_mr_list_v3[[18]], na.rm = TRUE))
+  train_mr_list_v3[[1]]  <- seasonal_transformation(train_mr_list_v3[[1]])
+  train_mr_list_v3[[18]] <- seasonal_transformation(train_mr_list_v3[[18]])
+  
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  
+  fitted_results_HBY_seasonal_adjustment[[i]] <- hby_fit(name_HBY_v3, paste0("30 countries whole MR seasonal adjustment - EW", i-1, ".txt"), paste0("30 countries whole Exposure - EW", i-1, ".txt"), 6, length(read_excel_name_v3), 4, training_period[i])
+  
+  forecasted_HBY_seasonal_adjustment <- gbll_forecasting_seasonal_adjustment(length(read_excel_name_v3), 4, 52, fitted_results_HBY_seasonal_adjustment[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, 6, c(1,1,1,1,1,1), colmeans_list)
+  
+  error_HBY_seasonal_adjustment[[i]] <- forecasted_HBY_seasonal_adjustment$error
+  
+  individual_error_HBY_seasonal_adjustment[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_HBY_seasonal_adjustment$individual_error,12,week_indicator)
+  
+  forecasted_mr_HBY_seasonal_adjustment[[i]] <- forecasted_HBY_seasonal_adjustment$forecasted_mortality
+}
+
+mean_error_HBY_seasonal_adjustment <- Reduce("+", unlist(error_HBY_seasonal_adjustment, recursive = FALSE))/(10*30)
+```
+
+
+
+
+
+# R1: Likelihood -> AIC, BIC
+## Gaussian
+```{r}
+gbll_likelihood <- function(n_pop, n_age, mortality_rate_list, train_time, horizon,
+                                 max_iteration, criterion = c("AIC","BIC")) {
+  
+  criterion <- match.arg(criterion)
+  
+  log_residual <- mortality_rate_list
+  iteration <- max_iteration
+  gamma <- c()
+  
+  # IC tracking
+  AICv <- rep(NA, max_iteration)
+  BICv <- rep(NA, max_iteration)
+  loglik_v <- rep(NA, max_iteration)
+  RSSv <- rep(NA, max_iteration)
+  
+  # store ax, bx, kt
+  ax <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  bx <- create_matrices_list((n_pop+1), n_age, max_iteration)
+  kt <- create_matrices_list((n_pop+1), max_iteration, train_time)
+  fitted_value <- create_matrices_list(n_pop, n_age, train_time)
+  
+  
+  for(i in 1:max_iteration){
+    exp_residual <- lapply(log_residual, function(mat) exp(mat))
+    product <- (exp_residual |> reduce(`*`))^(1/n_pop)
+    ratio_list <- mapply(function(mat_list) {mat_list/product}, exp_residual, SIMPLIFY = FALSE)
+    ratio_list_log <- lapply(ratio_list, function(matrix) log(matrix))
+    
+    # now fit the LC on product and each ratio
+    product_fitted <- lc(log(product))
+    ratio_fitted <- lapply(ratio_list_log, lc)
+    
+    # update the new residual after LC and find Gamma
+    new_log_residual <- list()
+    fitted <- list()
+    for(j in 1:n_pop){
+      matrix <- product_fitted$fitted + ratio_fitted[[j]]$fitted
+      fitted[[j]] <- matrix
+    }
+    
+    gamma_value <- optim(par=1, obj, method = "BFGS", n_pop = n_pop, n_age = n_age, 
+                         mortality_rate = log_residual, fitted_mortality = fitted)$par
+    gamma <- c(gamma, gamma_value)
+    
+    
+    for(j in 1:n_pop){
+      matrix_residual <- log_residual[[j]] - gamma_value* fitted[[j]]
+      new_log_residual[[j]] <- matrix_residual
+    }
+    log_residual <- new_log_residual
+    
+    # store the values of ax, bx and kt
+    ax[[1]][i,] <- product_fitted$ax
+    bx[[1]][i,] <- product_fitted$bx
+    kt[[1]][,i] <- product_fitted$kapa
+    
+    for(k in 1:n_pop){
+      ax[[k+1]][i,] <- ratio_fitted[[k]]$ax
+      bx[[k+1]][i,] <- ratio_fitted[[k]]$bx 
+      kt[[k+1]][,i] <- ratio_fitted[[k]]$kapa
+    }
+    
+    # Compute AIC/BIC for iteration i
+    resid_concat <- unlist(lapply(log_residual, function(m) as.numeric(m)))
+    resid_concat <- resid_concat[!is.na(resid_concat)]
+    RSS_i <- sum(resid_concat^2)
+    Nobs <- length(resid_concat)
+    n_param <- i*((n_pop + 1)*(2*n_age + train_time) + 1)
+    
+    sigma2_hat <- RSS_i / Nobs
+    loglik_i <- - (Nobs/2) * (log(2*pi) + 1 + log(sigma2_hat))
+    
+    RSSv[i] <- RSS_i
+    loglik_v[i] <- loglik_i
+    AICv[i] <- -2 * loglik_i + 2 * n_param
+    BICv[i] <- -2 * loglik_i + n_param * log(Nobs)
+  }
+  
+  best_i_AIC <- which.min(AICv)
+  best_i_BIC <- which.min(BICv)
+  iteration <- ifelse(criterion == "AIC", best_i_AIC, best_i_BIC)  
+
+  
+  # fitted values
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        fitted_value[[g]][,h] <- fitted_value[[g]][,h] +
+          gamma[z] * ( ax[[1]][z,h] + bx[[1]][z,h]*kt[[1]][,z] +
+                       ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt[[g+1]][,z] )
+      }
+    }
+  }
+  
+  for(j in 1:n_pop){
+    fitted_value[[j]] <- exp(fitted_value[[j]])
+  }
+  
+  return(list(
+    ax=ax, kapa=kt, bx=bx,
+    gamma=gamma,
+    iteration=iteration,
+    AIC_value = AICv,
+    BIC_value = BICv,
+    fitted_value=fitted_value
+  ))
+}
+```
+
+
+```{r}
+fitted_GBLL_likelihood_AIC <- list()
+fitted_GBLL_likelihood_BIC <- list()
+
+for(i in 1:10){
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  fitted_GBLL_likelihood_AIC[[i]] <- gbll_likelihood(length(read_excel_name_v3), 4, train_mr_list_v3, 
+                                                     training_period[i], 52, 50, criterion = "AIC")
+  fitted_GBLL_likelihood_BIC[[i]] <- gbll_likelihood(length(read_excel_name_v3), 4, train_mr_list_v3, 
+                                                     training_period[i], 52, 50, criterion = "BIC")  
+}
+
+
+## LL
+actual_likelihood <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[1],]))
+LL_residual <- create_matrices_list(30, 4, 208)
+for(i in 1:30){
+  if(flip_indicator_whole_v3[i]==0){
+      LL_residual[[i]] <- log(actual_likelihood[[i]]) - log(fitted_results_LL[[1]]$fitted_value[[i]])
+  } else{
+      LL_residual[[i]] <- log(actual_likelihood[[i]]) - log(1/fitted_results_LL[[1]]$fitted_value[[i]])
+  }
+}
+LL_RSS <- sum(unlist(lapply(LL_residual, function(m) as.numeric(m)))^2)
+LL_likelihood <- - (length(unlist(fitted_results_LL[[1]]$fitted_value))/2) * (log(2*pi) + 1 + log(LL_RSS/length(unlist(fitted_results_LL[[1]]$fitted_value))))
+LL_AIC <- -2*LL_likelihood + 2 * ((30 + 1)*(2*4 + 208))
+LL_BIC <- -2*LL_likelihood + ((30 + 1)*(2*4 + 208))*log(length(unlist(fitted_results_LL[[1]]$fitted_value)))
+
+
+
+## HBY
+HBY_residual <- create_matrices_list(30, 4, 208)
+for(i in 1:30){
+  if(flip_indicator_whole_v3[i]==0){
+      HBY_residual[[i]] <- log(actual_likelihood[[i]]) - log(fitted_results_HBY[[1]]$fitted_value[[i]])
+  } else{
+      HBY_residual[[i]] <- log(actual_likelihood[[i]]) - log(1/fitted_results_HBY[[1]]$fitted_value[[i]])
+  }
+}
+HBY_RSS <- sum(unlist(lapply(HBY_residual, function(m) as.numeric(m)))^2)
+HBY_likelihood <- - (length(unlist(fitted_results_HBY[[1]]$fitted_value))/2) * (log(2*pi) + 1 + log(HBY_RSS/length(unlist(fitted_results_HBY[[1]]$fitted_value))))
+HBY_AIC <- -2*HBY_likelihood + 2 * ((30 + 1)*(2*4 + 208)) *6
+HBY_BIC <- -2*HBY_likelihood + ((30 + 1)*(2*4 + 208))*6*log(length(unlist(fitted_results_HBY[[1]]$fitted_value)))
+
+
+
+## GBLL
+GBLL_residual <- create_matrices_list(30, 4, 208)
+for(i in 1:30){
+  if(flip_indicator_whole_v3[i]==0){
+      GBLL_residual[[i]] <- log(actual_likelihood[[i]]) - log(fitted_results_GBLL[[1]]$fitted_value[[i]])
+  } else{
+      GBLL_residual[[i]] <- log(actual_likelihood[[i]]) - log(1/fitted_results_GBLL[[1]]$fitted_value[[i]])
+  }
+}
+GBLL_RSS <- sum(unlist(lapply(GBLL_residual, function(m) as.numeric(m)))^2)
+GBLL_likelihood <- - (length(unlist(fitted_results_GBLL[[1]]$fitted_value))/2) * (log(2*pi) + 1 + log(GBLL_RSS/length(unlist(fitted_results_GBLL[[1]]$fitted_value))))
+GBLL_AIC <- -2*GBLL_likelihood + 2 * ((30 + 1)*(2*4 + 208 + 1))* 50
+GBLL_BIC <- -2*GBLL_likelihood + ((30 + 1)*(2*4 + 208 + 1))*50*log(length(unlist(fitted_results_GBLL[[1]]$fitted_value)))
+```
+
+
+
+
+## Poisson
+```{r}
+
+```
+
+
+
+# R1: Prediction interval
+```{r}
+LL_pi <- function(n_pop, n_age, horizon, fitted_output, train_regressor, test_regressor, flip_indicator, simulation_iter = 100, gamma, quantile=c(0.025,0.975)){
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  kt_forecast <- create_matrices_list((n_pop+1), simulation_iter, horizon)
+  for(d in 1:(n_pop+1)){           
+    for(f in 1:simulation_iter){   # Monte Carlo paths
+      kt_series <- kt[[d]][,1]
+      fit.gbll.kt <- auto.arima(kt_series, xreg = train_regressor)
+      if(length(coef(fit.gbll.kt)) < 4){
+        fit.gbll.kt <- auto.arima(kt_series)
+        kt_forecast[[d]][,f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE)
+      } else if(coeftest(fit.gbll.kt)["xreg1", "Pr(>|z|)"] < 0.05 || 
+                coeftest(fit.gbll.kt)["xreg2", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg3", "Pr(>|z|)"] < 0.05 ||
+                coeftest(fit.gbll.kt)["xreg4", "Pr(>|z|)"] < 0.05){
+        kt_forecast[[d]][,f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE, xreg = test_regressor)
+      } else {
+        fit.gbll.kt <- auto.arima(kt_series)
+        kt_forecast[[d]][,f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE)
+      }
+    }
+  }
+  
+  forecasted_mortality_log <- vector("list", n_pop)
+  for(g in 1:n_pop){
+    forecasted_mortality_log[[g]] <- array(0, dim = c(horizon, n_age, simulation_iter))
+  }
+  
+  for(sim in 1:simulation_iter){
+    for(g in 1:n_pop){
+      for(x in 1:n_age){
+        forecasted_mortality_log[[g]][,x,sim] <- gamma * (
+          ax[[1]][1,x] + bx[[1]][1,x] * kt_forecast[[1]][,sim] +  # common
+          ax[[g+1]][1,x] + bx[[g+1]][1,x] * kt_forecast[[g+1]][,sim]  # country-specific
+        )
+      }
+    }
+  }
+  
+  forecasted_mortality <- forecasted_mortality_log
+  for(g in 1:n_pop){
+    if(flip_indicator[g]==0){
+      forecasted_mortality[[g]] <- exp(forecasted_mortality[[g]])
+    } else{
+      forecasted_mortality[[g]] <- 1 / exp(forecasted_mortality[[g]])
+    }
+  }
+  
+  lower <- vector("list", n_pop)
+  upper <- vector("list", n_pop)
+  for(g in 1:n_pop){
+    lower[[g]] <- apply(forecasted_mortality[[g]], c(1,2), function(x) quantile(x, quantile[1]))
+    upper[[g]] <- apply(forecasted_mortality[[g]], c(1,2), function(x) quantile(x, quantile[2]))
+  }
+  
+  
+  
+  return(list(lower=lower, upper=upper))
+}
+
+
+
+
+
+## function to compute the forecast error
+compute_forecast_error <- function(pred, test_mortality, n_pop, n_age, h_months, week_indicator) {
+  difference <- Map(`-`, pred, test_mortality)
+  abs_difference <- lapply(difference, abs)
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+
+  rowsum_forecast_error <- lapply(forecast_error_individual, rowSums)
+
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  for (m in 1:n_pop) {
+    for (n in 1:h_months) {
+      forecast_error[[m]][n] <- sum(
+        rowsum_forecast_error[[m]][1:week_indicator[n+1]]
+      ) / (n_age * week_indicator[n+1])
+    }
+  }
+
+  return(forecast_error)
+}
+
+
+## winkler score
+winkler_score_list <- function(lower_list, upper_list, actual_list, level = 95){
+
+  alpha <- 1 - level/100
+  n_pop <- length(lower_list)
+
+  scores <- numeric(n_pop)
+
+  for(g in 1:n_pop){
+
+    L <- lower_list[[g]]     # 52×4
+    U <- upper_list[[g]]     # 52×4
+    y <- actual_list[[g]]    # 52×4
+
+    W <- U - L
+
+    penalty_lower <- ifelse(y < L, (2/alpha) * (L - y), 0)
+    penalty_upper <- ifelse(y > U, (2/alpha) * (y - U), 0)
+
+    S <- W + penalty_lower + penalty_upper
+
+    # mean over all weeks and ages
+    scores[g] <- mean(S, na.rm = TRUE)
+  }
+
+  return(scores)
+}
+```
+
+
+
+
+```{r}
+simulation_pi <- function(n_pop, n_age, horizon, fitted_output, train_regressor, test_regressor,
+                  flip_indicator, simulation_iter = 100, gamma, quantile = c(0.025, 0.975), seed) {
+  set.seed(seed)
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  n_kt <- ncol(kt[[1]])
+  
+  # Initialize kt forecast: list of (pop+1), each is array [horizon, n_kt, simulation_iter]
+  kt_forecast <- vector("list", n_pop + 1)
+  for(d in 1:(n_pop + 1)) {
+    kt_forecast[[d]] <- array(0, dim = c(horizon, n_kt, simulation_iter))
+  }
+  
+  # Simulate each kt once per simulation
+  for(d in 1:(n_pop + 1)) {
+    for(z in 1:n_kt) {       
+      kt_series <- kt[[d]][, z]
+      for(f in 1:simulation_iter) {
+        fit.gbll.kt <- auto.arima(kt_series, xreg = train_regressor)
+        
+        # Decide whether to use xreg
+        if(length(coef(fit.gbll.kt)) < 4) {
+          fit.gbll.kt <- auto.arima(kt_series)
+          kt_forecast[[d]][, z, f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE)
+        } else if(coeftest(fit.gbll.kt)["xreg1", "Pr(>|z|)"] < 0.05 || 
+                  coeftest(fit.gbll.kt)["xreg2", "Pr(>|z|)"] < 0.05 ||
+                  coeftest(fit.gbll.kt)["xreg3", "Pr(>|z|)"] < 0.05 ||
+                  coeftest(fit.gbll.kt)["xreg4", "Pr(>|z|)"] < 0.05) {
+          kt_forecast[[d]][, z, f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE, xreg = test_regressor)
+        } else {
+          fit.gbll.kt <- auto.arima(kt_series)
+          kt_forecast[[d]][, z, f] <- simulate(fit.gbll.kt, nsim = horizon, future = TRUE)
+        }
+      }
+    }
+  }
+  
+  # Initialize forecasted mortality log
+  forecasted_mortality_log <- vector("list", n_pop)
+  for(g in 1:n_pop) {
+    forecasted_mortality_log[[g]] <- array(0, dim = c(horizon, n_age, simulation_iter))
+  }
+  
+  # Construct forecasted mortality for each simulation
+  for(sim in 1:simulation_iter) {
+    for(g in 1:n_pop) {
+      for(h in 1:n_age) {
+        forecasted_mortality_log[[g]][, h, sim] <- 0
+        for(z in 1:n_kt) {
+          forecasted_mortality_log[[g]][, h, sim] <- forecasted_mortality_log[[g]][, h, sim] +
+            gamma[z] * (
+              ax[[1]][z, h] + bx[[1]][z, h] * kt_forecast[[1]][, z, sim] +   # common kt
+              ax[[g + 1]][z, h] + bx[[g + 1]][z, h] * kt_forecast[[g + 1]][, z, sim]  # country-specific
+            )
+        }
+      }
+    }
+  }
+  
+  # Convert to actual mortality
+  forecasted_mortality <- forecasted_mortality_log
+  for(g in 1:n_pop) {
+    if(flip_indicator[g] == 0) {
+      forecasted_mortality[[g]] <- exp(forecasted_mortality[[g]])
+    } else {
+      forecasted_mortality[[g]] <- 1 / exp(forecasted_mortality[[g]])
+    }
+  }
+  
+  # Compute prediction intervals
+  lower <- vector("list", n_pop)
+  upper <- vector("list", n_pop)
+  for(g in 1:n_pop) {
+    lower[[g]] <- apply(forecasted_mortality[[g]], c(1, 2), function(x) quantile(x, quantile[1]))
+    upper[[g]] <- apply(forecasted_mortality[[g]], c(1, 2), function(x) quantile(x, quantile[2]))
+  }
+  
+  return(list(lower = lower, upper = upper))
+}
+
+
+
+
+
+
+
+## function to compute the forecast error
+compute_forecast_error <- function(pred, test_mortality, n_pop, n_age, h_months, week_indicator) {
+  difference <- Map(`-`, pred, test_mortality)
+  abs_difference <- lapply(difference, abs)
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+
+  rowsum_forecast_error <- lapply(forecast_error_individual, rowSums)
+
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  for (m in 1:n_pop) {
+    for (n in 1:h_months) {
+      forecast_error[[m]][n] <- sum(
+        rowsum_forecast_error[[m]][1:week_indicator[n+1]]
+      ) / (n_age * week_indicator[n+1])
+    }
+  }
+
+  return(forecast_error)
+}
+
+
+
+
+
+
+
+## winkler score
+winkler_score_list <- function(lower_list, upper_list, actual_list, level = 95){
+
+  alpha <- 1 - level/100
+  n_pop <- length(lower_list)
+
+  scores <- numeric(n_pop)
+
+  for(g in 1:n_pop){
+
+    L <- lower_list[[g]]     # 52×4
+    U <- upper_list[[g]]     # 52×4
+    y <- actual_list[[g]]    # 52×4
+
+    W <- U - L
+
+    penalty_lower <- ifelse(y < L, (2/alpha) * (L - y), 0)
+    penalty_upper <- ifelse(y > U, (2/alpha) * (y - U), 0)
+
+    S <- W + penalty_lower + penalty_upper
+
+    # mean over all weeks and ages
+    scores[g] <- mean(S, na.rm = TRUE)
+  }
+
+  return(scores)
+}
+```
+
+
+
+```{r}
+error_LL_pi_lower <- list()
+error_LL_pi_upper <- list()
+forecasted_mr_LL_pi_lower <- list()
+forecasted_mr_LL_pi_upper <- list()
+winkler_LL <- list()
+
+
+error_HBY_pi_lower <- list()
+error_HBY_pi_upper <- list()
+forecasted_mr_HBY_pi_lower <- list()
+forecasted_mr_HBY_pi_upper <- list()
+winkler_HBY <- list()
+
+
+error_GBLL_pi_lower <- list()
+error_GBLL_pi_upper <- list()
+forecasted_mr_GBLL_pi_lower <- list()
+forecasted_mr_GBLL_pi_upper <- list()
+winkler_GBLL <- list()
+
+
+### LL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  LL_pi_100 <- simulation_pi(30, 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, fitted_results_LL[[i]]$gamma, 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_LL_pi_lower[[i]] <- LL_pi_100$lower
+  forecasted_mr_LL_pi_upper[[i]] <- LL_pi_100$upper
+  
+  error_LL_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_lower[[i]], 
+                                                   test_mr_list_v3,30,4,12,week_indicator)
+  error_LL_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_upper[[i]],
+                                                   test_mr_list_v3,30,4,12,week_indicator)
+  
+  winkler_LL[[i]] <- winkler_score_list(forecasted_mr_LL_pi_lower[[i]], forecasted_mr_LL_pi_upper[[i]],
+                                        test_mr_list_v3, 95)
+}
+
+mape_LL_pi_lower <- Reduce("+", unlist(error_LL_pi_lower, recursive = FALSE)) / (10*30)
+mape_LL_pi_upper <- Reduce("+", unlist(error_LL_pi_upper, recursive = FALSE)) / (10*30)
+winkler_mean_LL <- mean(unlist(winkler_LL))
+
+
+
+
+## HBY
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  HBY_pi_100 <- simulation_pi(30, 4, 52, fitted_results_HBY[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, c(1,1,1,1,1,1), 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_HBY_pi_lower[[i]] <- HBY_pi_100$lower
+  forecasted_mr_HBY_pi_upper[[i]] <- HBY_pi_100$upper
+  
+  error_HBY_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_HBY_pi_lower[[i]], 
+                                                    test_mr_list_v3,30,4,12,week_indicator)
+  error_HBY_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_HBY_pi_upper[[i]],
+                                                    test_mr_list_v3,30,4,12,week_indicator)
+  
+  winkler_HBY[[i]] <- winkler_score_list(forecasted_mr_HBY_pi_lower[[i]], forecasted_mr_HBY_pi_upper[[i]],
+                                        test_mr_list_v3, 95)
+}
+
+mape_HBY_pi_lower <- Reduce("+", unlist(error_HBY_pi_lower, recursive = FALSE)) / (10*30)
+mape_HBY_pi_upper <- Reduce("+", unlist(error_HBY_pi_upper, recursive = FALSE)) / (10*30)
+winkler_mean_HBY <- mean(unlist(winkler_HBY))
+
+
+# GBLL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  GBLL_pi_100 <- simulation_pi(30, 4, 52, fitted_results_GBLL[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, fitted_results_GBLL[[i]]$gamma, 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_GBLL_pi_lower[[i]] <- GBLL_pi_100$lower
+  forecasted_mr_GBLL_pi_upper[[i]] <- GBLL_pi_100$upper
+  
+  error_GBLL_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_GBLL_pi_lower[[i]], 
+                                                     test_mr_list_v3,30,4,12,week_indicator)
+  error_GBLL_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_GBLL_pi_upper[[i]],
+                                                     test_mr_list_v3,30,4,12,week_indicator)
+  
+  winkler_GBLL[[i]] <- winkler_score_list(forecasted_mr_GBLL_pi_lower[[i]], forecasted_mr_GBLL_pi_upper[[i]],
+                                          test_mr_list_v3, 95)
+}
+
+mape_GBLL_pi_lower <- Reduce("+", unlist(error_GBLL_pi_lower, recursive = FALSE)) / (10*30)
+mape_GBLL_pi_upper <- Reduce("+", unlist(error_GBLL_pi_upper, recursive = FALSE)) / (10*30)
+winkler_mean_GBLL <- mean(unlist(winkler_GBLL))
+```
+
+
+# compute coverage
+```{r}
+total_inside_LL <- 0
+total_inside_HBY <- 0
+total_inside_GBLL <- 0
+
+# LL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_LL_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_LL_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_LL <- total_inside_LL + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_LL <- total_inside_LL/(52*4*30*10)
+
+
+
+# HBY
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_HBY_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_HBY_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_HBY <- total_inside_HBY + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_HBY <- total_inside_HBY/(52*4*30*10)
+
+
+
+# GBLL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_GBLL_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_GBLL_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_GBLL <- total_inside_GBLL + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_GBLL <- total_inside_GBLL/(52*4*30*10)
+
+
+
+# summary
+df_coverage <- data.frame(
+  Model = c("LL", "HBY", "GBLL"),
+  Total_Inside = c(total_inside_LL,
+                   total_inside_HBY,
+                   total_inside_GBLL)
+)
+```
+
+
+
+
+```{r}
+error_LL_pi_lower_1000 <- list()
+error_LL_pi_upper_1000 <- list()
+forecasted_mr_LL_pi_lower_1000 <- list()
+forecasted_mr_LL_pi_upper_1000 <- list()
+winkler_LL_1000 <- list()
+
+### LL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  LL_pi_1000 <- simulation_pi(30, 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 1000, fitted_results_LL[[i]]$gamma, 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_LL_pi_lower_1000[[i]] <- LL_pi_1000$lower
+  forecasted_mr_LL_pi_upper_1000[[i]] <- LL_pi_1000$upper
+  
+  error_LL_pi_lower_1000[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_lower_1000[[i]], 
+                                                        test_mr_list_v3,30,4,12,week_indicator)
+  error_LL_pi_upper_1000[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_upper_1000[[i]],
+                                                        test_mr_list_v3,30,4,12,week_indicator)
+  
+  winkler_LL_1000[[i]] <- winkler_score_list(forecasted_mr_LL_pi_lower_1000[[i]], 
+                                             forecasted_mr_LL_pi_upper_1000[[i]],
+                                             test_mr_list_v3, 95)
+  print(i)
+}
+
+mape_LL_pi_lower_1000 <- Reduce("+", unlist(error_LL_pi_lower_1000, recursive = FALSE)) / (10*30)
+mape_LL_pi_upper_1000 <- Reduce("+", unlist(error_LL_pi_upper_1000, recursive = FALSE)) / (10*30)
+winkler_mean_LL_1000 <- mean(unlist(winkler_LL_1000))
+```
+
+
+
+
+
+# R1: correlation among period effects (common and country-specific)
+```{r}
+corr_array <- array(NA, dim = c(10, 30, 50),
+                    dimnames = list(i = 1:10,
+                                    k = 2:31,
+                                    l = 1:50))
+
+for (i in 1:10) {
+  for (k in 2:31) {
+    for (l in 1:50) {
+
+      x <- ts(fitted_results_GBLL[[i]]$kapa[[1]][, l])
+      y <- ts(fitted_results_GBLL[[i]]$kapa[[k]][, l])
+
+      ccf_result <- ccf(x, y, lag.max = 20, plot = FALSE)
+
+      lag0_corr <- ccf_result$acf[which(ccf_result$lag == 0)]
+
+      corr_array[i, k - 1, l] <- lag0_corr
+    }
+  }
+}
+
+
+# get the maximum value:
+max_corr <- max(abs(corr_array), na.rm = TRUE)
+max_corr
+
+idx <- order(abs(corr_array), decreasing = TRUE)[1:10]
+top10_values <- corr_array[idx]
+top10_values
+arrayInd(idx, dim(corr_array))
+
+
+plot(fitted_results_GBLL[[1]]$kapa[[1]][,29])
+lines(fitted_results_GBLL[[1]]$kapa[[1]][,29])
+
+plot(fitted_results_GBLL[[1]]$kapa[[19]][,29])
+lines(fitted_results_GBLL[[1]]$kapa[[19]][,29])
+
+
+# get the mean(abs(values))
+mean_abs_corr <- mean(abs(corr_array), na.rm = TRUE)
+```
+
+
+
+# R1: VAR on kt
+```{r}
+gbll_forecast_var_kt <- function(n_pop, n_age, horizon, fitted_output, flip_indicator, test_mortality, week_indicator, h_months, iteration, gamma){
+  
+  # rename and store the values of ax, bx, kt
+  ax <- fitted_output$ax
+  bx <- fitted_output$bx
+  kt <- fitted_output$kapa
+  
+  kt_forecast <- create_matrices_list((n_pop+1), iteration, horizon)
+  
+  # forecast the kt
+  for(i in 1:iteration){
+    kt_input <- do.call(cbind, lapply(kt, function(mat) mat[,i]))
+    kt_input_ts <- ts(kt_input, frequency = 52)
+    
+    # stationarity check
+    d_vec <- sapply(1:(n_pop+1), function(k) ndiffs(na.omit(kt_input_ts[, k])))
+    D_vec <- sapply(1:(n_pop+1), function(k) nsdiffs(na.omit(kt_input_ts[, k])))
+    d <- min(max(d_vec),1)
+    D <- min(max(D_vec),1)
+    
+    # apply differencing
+    kt_input_diff <- kt_input_ts
+    if (D > 0) kt_input_diff <- diff(kt_input_diff, lag = 52, differences = D)
+    if (d > 0) kt_input_diff <- diff(kt_input_diff, differences = d)
+    kt_input_diff <- na.omit(kt_input_diff)
+    
+    # lag selection
+    lag_selection <- VARselect(kt_input_diff, lag.max = 2, type = "none")
+    p_opt <- lag_selection$selection["HQ(n)"]
+    var_model <- VAR(kt_input_diff, p = p_opt, type = "none")
+    
+    # forecast 52 weeks ahead
+    fc <- predict(var_model, n.ahead = 52)
+    fc_mat <- sapply(fc$fcst, function(x) x[, "fcst"])
+    
+    # convert back to the original scale
+    last_level <- kt_input[nrow(kt_input), ]
+    fc_level <- matrix(NA, nrow = 52, ncol = n_pop+1)
+
+    for (country in 1:(n_pop+1)) {
+      if (d == 0 & D == 0) {
+        # 1) no differencing
+        fc_level[, country] <- fc_mat[, country]
+    
+      } else if (d == 1 & D == 0) {
+        # 2) regular difference only
+        fc_level[, country] <- last_level[country] + cumsum(fc_mat[, country])
+    
+      } else if (d == 0 & D == 1) {
+        # 3) seasonal difference only
+        hist_window <- kt_input[(nrow(kt_input)-51):nrow(kt_input), country]  # last 52 periods
+        level_preds <- numeric(52)
+        for (t in 1:52) {
+          level_preds[t] <- hist_window[t] + fc_mat[t, age]
+        }
+        fc_level[, country] <- level_preds
+      } else if (d == 1 & D == 1) {
+        # 4) both regular and seasonal differencing
+        hist_window <- kt_input[(nrow(kt_input)-52):nrow(kt_input), country]  # last 53 periods
+        kt_input_season_diff <- numeric(52)
+        kt_input_forecast <- numeric(52)
+        for (t in 1:52) {
+          if (t == 1) {
+            # undo regular differencing
+            kt_input_season_diff[t] <- hist_window[53] + fc_mat[t, country]
+            # undo seasonal differencing
+            kt_input_forecast[t] <- kt_input_season_diff[t] + hist_window[2] - hist_window[1]
+          } else {
+            kt_input_season_diff[t] <- kt_input_season_diff[t - 1] + fc_mat[t, country]
+            kt_input_forecast[t] <- kt_input_season_diff[t] + hist_window[t + 1] - hist_window[t]
+          }
+        }
+        fc_level[, country] <- kt_input_forecast
+      }
+    }
+    
+    # store in the forecast_kt
+    for(q in 1:(n_pop+1)){
+      kt_forecast[[q]][, i] <- fc_level[, q]
+    }
+  }
+  
+  # find the log forecasted mortality
+  forecasted_mortality <- create_matrices_list(n_pop, n_age, horizon)
+  for(z in 1:iteration){
+    for(g in 1:n_pop){
+      for(h in 1:n_age){
+        forecasted_mortality[[g]][,h] <- forecasted_mortality[[g]][,h] + gamma[z]*(ax[[1]][z,h] + bx[[1]][z,h]*kt_forecast[[1]][,z] + ax[[g+1]][z,h] + bx[[g+1]][z,h]*kt_forecast[[g+1]][,z])
+      }
+    }
+  }
+ 
+  
+  # find the actual forecasted mortality
+  for(p in 1:n_pop){
+    if(flip_indicator[p]==0){
+      forecasted_mortality[[p]] <- exp(forecasted_mortality[[p]])
+    } else{
+      forecasted_mortality[[p]] <- 1/exp(forecasted_mortality[[p]])
+    }
+  }
+  
+  
+  # find the forecasting error
+  forecast_error_individual <- create_matrices_list(n_pop, n_age, horizon)
+  rowsum_forecast_error <- create_matrices_list(n_pop, 1, horizon)
+  forecast_error <- create_matrices_list(n_pop, 1, h_months)
+  
+  difference <- Map(`-`, forecasted_mortality, test_mortality)
+  abs_difference <- lapply(difference, function(diff) abs(diff))
+  forecast_error_individual <- Map(`/`, abs_difference, test_mortality)
+  
+  rowsum_forecast_error <- lapply(forecast_error_individual, function(error) rowSums(error))
+  
+  for(m in 1:n_pop){
+    for(n in 1:h_months){
+      forecast_error[[m]][n] <- sum(rowsum_forecast_error[[m]][1:week_indicator[n+1]])/(n_age*week_indicator[n+1])
+    }
+  }
+  
+  
+  # return the value
+  output <- list(forecasted_mortality=forecasted_mortality, error=forecast_error, individual_error = forecast_error_individual)
+  return(output)
+}
+```
+
+
+```{r}
+# GBLL
+error_GBLL_var_kt <- list()
+individual_error_GBLL_var_kt <- list()
+forecasted_mr_GBLL_var_kt <- list()
+
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  
+  forecasted_GBLL_var_kt <- gbll_forecast_var_kt(length(read_excel_name_v3),4,52, fitted_results_GBLL[[i]], flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL[[i]]$iteration, fitted_results_GBLL[[i]]$gamma)
+  error_GBLL_var_kt[[i]] <- forecasted_GBLL_var_kt$error
+  individual_error_GBLL_var_kt[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL_var_kt$individual_error,12,week_indicator)
+  forecasted_mr_GBLL_var_kt[[i]] <- forecasted_GBLL_var_kt$forecasted_mortality
+}
+
+mean_error_GBLL_var_kt <- Reduce("+", unlist(error_GBLL_var_kt, recursive = FALSE)) / (10*30)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+HBY_correlation <- array(NA, dim=c(30,6))
+for(j in 1:30){
+  for(k in 1:6){
+    x <- ts(fitted_results_HBY[[1]]$kapa[[1]][, k])
+    y <- ts(fitted_results_HBY[[1]]$kapa[[j+1]][, k])
+
+    ccf_result <- ccf(x, y, lag.max = 20, plot = FALSE)
+
+    lag0_corr <- ccf_result$acf[which(ccf_result$lag == 0)]
+
+    HBY_correlation[j, k] <- lag0_corr
+  }
+}
+
+idx_HBY <- order(abs(HBY_correlation), decreasing = TRUE)[1:10]
+top10_values_HBY <- corr_array[idx_HBY]
+top10_values_HBY
+arrayInd(idx_HBY, dim(HBY_correlation))
+```
+
+
+
+# R1: MAE
+```{r}
+mean_MAE_LL <- Reduce("+", unlist(error_LL_MAE, recursive = FALSE)) / (10*30)
+mean_MAE_HBY <- Reduce("+", unlist(error_HBY_MAE, recursive = FALSE)) / (10*30)
+mean_MAE_GBLL <- Reduce("+", unlist(error_GBLL_MAE, recursive = FALSE)) / (10*30)
+```
+
+
+# R1: MAE by age group
+```{r}
+mae_individual_LL <- list()
+mae_individual_HBY <- list()
+mae_individual_GBLL <- list()
+
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  difference_LL <- Map(`-`, forecasted_mr_LL[[i]], test_mr_list_v3)
+  abs_difference_LL <- lapply(difference_LL, function(diff) abs(diff))
+  mae_individual_LL[[i]] <- mape_h(length(read_excel_name_v3),4,abs_difference_LL,12,week_indicator)
+  
+  difference_HBY <- Map(`-`, forecasted_mr_HBY[[i]], test_mr_list_v3)
+  abs_difference_HBY <- lapply(difference_HBY, function(diff) abs(diff))
+  mae_individual_HBY[[i]] <- mape_h(length(read_excel_name_v3),4,abs_difference_HBY,12,week_indicator) 
+  
+  difference_GBLL <- Map(`-`, forecasted_mr_GBLL[[i]], test_mr_list_v3)
+  abs_difference_GBLL <- lapply(difference_GBLL, function(diff) abs(diff))
+  mae_individual_GBLL[[i]] <- mape_h(length(read_excel_name_v3),4,abs_difference_GBLL,12,week_indicator)
+}
+
+
+
+# LL
+all_MAE_LL <- unlist(mae_individual_LL, recursive = FALSE)
+combined_MAE_LL <- simplify2array(all_MAE_LL)
+mean_MAE_AG_LL <- apply(combined_MAE_LL, c(1, 2), mean)
+
+# HBY
+all_MAE_HBY <- unlist(mae_individual_HBY, recursive = FALSE)
+combined_MAE_HBY <- simplify2array(all_MAE_HBY)
+mean_MAE_AG_HBY <- apply(combined_MAE_HBY, c(1, 2), mean)
+
+# GBLL
+all_MAE_GBLL <- unlist(mae_individual_GBLL, recursive = FALSE)
+combined_MAE_GBLL <- simplify2array(all_MAE_GBLL)
+mean_MAE_AG_GBLL <- apply(combined_MAE_GBLL, c(1, 2), mean)
+```
+
+
+# R1: MASE
+```{r}
+# by age group
+LL_MASE_AG <- mean_mase(forecasted_mr_LL, mr_list_v3, week_indicator, 52)
+HBY_MASE_AG <- mean_mase(forecasted_mr_HBY, mr_list_v3, week_indicator, 52)
+GBLL_MASE_AG <- mean_mase(forecasted_mr_GBLL, mr_list_v3, week_indicator, 52)
+
+# Mean
+mean_MASE_LL <- matrix(rowMeans(LL_MASE_AG), ncol=1)
+mean_MASE_HBY <- matrix(rowMeans(HBY_MASE_AG), ncol=1)
+mean_MASE_GBLL <- matrix(rowMeans(GBLL_MASE_AG), ncol=1)
+```
+
+
+
+# R1: SARIMA
+```{r}
+# create lists to store the outputs for each expanding window
+fitted_results_LL_SARIMA <- list()
+error_LL_SARIMA <- list()
+individual_error_LL_SARIMA <- list()
+error_LL_MAE_SARIMA <- list()
+forecasted_mr_LL_SARIMA <- list()
+
+fitted_results_HBY_SARIMA <- list()
+error_HBY_SARIMA <- list()
+individual_error_HBY_SARIMA <- list()
+error_HBY_MAE_SARIMA <- list()
+forecasted_mr_HBY_SARIMA <- list()
+
+fitted_results_GBLL_SARIMA <- list()
+error_GBLL_SARIMA <- list()
+individual_error_GBLL_SARIMA <- list()
+error_GBLL_MAE_SARIMA <- list()
+forecasted_mr_GBLL_SARIMA <- list()
+
+  
+
+# do 10 times of expanding window
+training_period <- 208-week_indicator[1:10]
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+
+  
+  # LL
+  fitted_results_LL_SARIMA[[i]] <- gbll_original(length(read_excel_name_v3), 4, train_mr_list_v3, training_period[i],52,1)
+  forecasted_LL_SARIMA <- gbll_forecasting_SARIMA(length(read_excel_name_v3), 4, 52, fitted_results_LL_SARIMA[[i]], flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_LL_SARIMA[[i]]$iteration, 1)
+  error_LL_SARIMA[[i]] <- forecasted_LL_SARIMA$error
+  individual_error_LL_SARIMA[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_LL_SARIMA$individual_error,12,week_indicator)
+  error_LL_MAE_SARIMA[[i]] <- error_MAE(forecasted_LL_SARIMA$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_LL_SARIMA[[i]] <- forecasted_LL_SARIMA$forecasted_mortality
+}
+
+
+
+
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+
+  # HBY
+  fitted_results_HBY_SARIMA[[i]] <- hby_fit(name_HBY_v3, paste0("30 countries whole MR - EW", i-1, ".txt"), paste0("30 countries whole Exposure - EW", i-1, ".txt"), 6, length(read_excel_name_v3), 4, training_period[i])
+  forecasted_HBY_SARIMA <- gbll_forecasting_SARIMA(length(read_excel_name_v3), 4, 52, fitted_results_HBY_SARIMA[[i]], flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, 6, c(1,1,1,1,1,1))
+  error_HBY_SARIMA[[i]] <- forecasted_HBY_SARIMA$error
+  individual_error_HBY_SARIMA[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_HBY_SARIMA$individual_error,12,week_indicator)
+  error_HBY_MAE_SARIMA[[i]] <- error_MAE(forecasted_HBY_SARIMA$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_HBY_SARIMA[[i]] <- forecasted_HBY_SARIMA$forecasted_mortality
+}
+
+
+for(i in 1:10){
+  # prepare the data needed
+  train_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i],]))
+  train_mr_list_v3[[1]] <- 1/train_mr_list_v3[[1]]
+  train_mr_list_v3[[18]] <- 1/train_mr_list_v3[[18]]
+  train_mr_list_v3 <- lapply(train_mr_list_v3, log)
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+
+  #GBLL
+  fitted_results_GBLL_SARIMA[[i]] <- gbll_original(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
+  forecasted_GBLL_SARIMA <- gbll_forecasting_SARIMA(length(read_excel_name_v3), 4, 52, fitted_results_GBLL_SARIMA[[i]],flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL_SARIMA[[i]]$iteration, fitted_results_GBLL_SARIMA[[i]]$gamma)
+  error_GBLL_SARIMA[[i]] <- forecasted_GBLL_SARIMA$error
+  individual_error_GBLL_SARIMA[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL_SARIMA$individual_error,12,week_indicator)
+  error_GBLL_MAE_SARIMA[[i]] <- error_MAE(forecasted_GBLL_SARIMA$forecasted_mortality, test_mr_list_v3,length(read_excel_name_v3),4,52,12,week_indicator)
+  forecasted_mr_GBLL_SARIMA[[i]] <- forecasted_GBLL_SARIMA$forecasted_mortality
+}
+
+
+
+
+# Final mean error
+mean_error_LL_SARIMA <- Reduce("+", unlist(error_LL_SARIMA, recursive = FALSE)) / (10*30)
+mean_error_HBY_SARIMA <- Reduce("+", unlist(error_HBY_SARIMA, recursive = FALSE)) / (10*30)
+mean_error_GBLL_SARIMA <- Reduce("+", unlist(error_GBLL_SARIMA, recursive = FALSE)) / (10*30)
+```
+
+
+
+
+# R1: try multi-population VAR
+```{r}
+library(BGVAR)
+var_df <- country_df %>%
+  rename(
+    age15_64 = `15-64`,
+    age65_74 = `65-74`,
+    age75_84 = `75-84`,
+    age85_plus   = `85+`
+  ) %>%
+  arrange(country, date)
+
+# flip AUS and NZ
+southern_countries <- c("Australia", "New Zealand")
+
+var_df_flipped <- var_df %>%
+  mutate(
+    age15_64 = ifelse(country %in% southern_countries, 1/age15_64, age15_64),
+    age65_74 = ifelse(country %in% southern_countries, 1/age65_74, age65_74),
+    age75_84 = ifelse(country %in% southern_countries, 1/age75_84, age75_84),
+    age85_plus   = ifelse(country %in% southern_countries, 1/age85_plus, age85_plus)
+  )
+
+# log + first diff
+var_df_logdiff <- var_df_flipped %>%
+  group_by(country) %>%
+  arrange(date) %>%
+  mutate(
+    logdiff_age15_64 = c(NA, diff(log(age15_64))),
+    logdiff_age65_74 = c(NA, diff(log(age65_74))),
+    logdiff_age75_84 = c(NA, diff(log(age75_84))),
+    logdiff_age85_plus = c(NA, diff(log(age85_plus)))
+  ) %>%
+  ungroup()
+var_df_logdiff <- var_df_logdiff %>%
+  filter(!is.na(logdiff_age15_64))
+
+
+
+
+# prepare the data_frame
+countries <- unique(var_df_logdiff$country)
+country_list <- lapply(countries, function(cty) {
+  df <- var_df_logdiff %>% filter(country == cty)
+  as.matrix(df[, c("logdiff_age15_64", "logdiff_age65_74", "logdiff_age75_84", "logdiff_age85_plus")])
+})
+names(country_list) <- countries
+
+names(country_list) <- c(
+  "Australia"         = "AU",
+  "Austria"           = "AT",
+  "Belgium"           = "BE",
+  "Bulgaria"          = "BG",
+  "Canada"            = "CA",
+  "Croatia"           = "HR",
+  "Czech Republic"    = "CZ",
+  "Denmark"           = "DK",
+  "England and Wales" = "EW",
+  "Finland"           = "FI",
+  "France"            = "FR",
+  "Germany"           = "DE",
+  "Greece"            = "GR",
+  "Hungary"           = "HU",
+  "Italy"             = "IT",
+  "Lithuania"         = "LT",
+  "Netherlands"       = "NL",
+  "New Zealand"       = "NZ",
+  "Norway"            = "NO",
+  "Poland"            = "PL",
+  "Portugal"          = "PT",
+  "Scotland"          = "SC",
+  "Slovakia"          = "SK",
+  "Slovenia"          = "SI",
+  "South Korea"       = "KR",
+  "Spain"             = "ES",
+  "Sweden"            = "SE",
+  "Switzerland"       = "CH",
+  "Taiwan"            = "TW",
+  "USA"               = "US"
+)
+
+
+
+
+# define W
+N <- length(countries)
+W <- matrix(1/(N-1), nrow=N, ncol=N)
+diag(W) <- 0
+rownames(W) <- colnames(W) <- names(country_list)
+
+
+
+# find the optimal lag
+lags <- 1:5
+aic_vec <- numeric(length(lags))
+bic_vec <- numeric(length(lags))
+
+for (i in lags) {
+  gvar_model <- bgvar(Data = country_list, plag = i, W = W, trend=TRUE)
+  
+  loglik <- logLik(gvar_model)
+  npar <- length(coef(gvar_model))
+  Tobs <- nrow(country_list[[1]])  # approximate time length per country
+  
+  aic_vec[i] <- -2 * loglik / Tobs + 2 * npar / Tobs
+  bic_vec[i] <- -2 * loglik / Tobs + log(Tobs) * npar / Tobs
+}
+
+data.frame(lag = lags, AIC = aic_vec, BIC = bic_vec)
+```
+
+
+# R1: single-population VAR
+```{r}
+library(vars)
+all_mape <- vector("list", 10) 
+all_forecasts <- vector("list", 10)
+
+for(i in 1:10){
+    train_list <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i], ]))
+    window_forecasts <- vector("list", length(train_list))
+    
+    for (c in seq_len(length(train_list))) {
+        y <- train_list[[c]]
+        y_log <- log(y)
+        y_ts <- ts(y_log, frequency = 52)
+
+        # stationarity check
+        d_vec <- sapply(1:4, function(k) ndiffs(na.omit(y_ts[, k])))
+        D_vec <- sapply(1:4, function(k) nsdiffs(na.omit(y_ts[, k])))
+        d <- min(max(d_vec),1)
+        D <- min(max(D_vec),1)
+        
+        # apply differencing
+        y_diff <- y_ts
+        if (D > 0) y_diff <- diff(y_diff, lag = 52, differences = D)
+        if (d > 0) y_diff <- diff(y_diff, differences = d)
+        y_diff <- na.omit(y_diff)
+        
+        # lag selection
+        lag_selection <- VARselect(y_diff, lag.max = 10, type = "const")
+        p_opt <- lag_selection$selection["HQ(n)"]
+        var_model <- VAR(y_diff, p = p_opt, type = "const")
+        
+        
+        # forecast 52 weeks ahead
+        fc <- predict(var_model, n.ahead = 52)
+        fc_mat <- sapply(fc$fcst, function(x) x[, "fcst"])
+        
+        # revert back to original mortality
+        last_log <- log(y[nrow(y), ])
+        fc_level <- matrix(NA, nrow = 52, ncol = dim(train_list[[c]])[2])
+        for (age in 1:dim(train_list[[c]])[2]) {
+          if (d == 0 & D == 0) {
+            # 1) no differencing
+            fc_level[, age] <- exp(fc_mat[, age])
+          } else if (d == 1 & D == 0) {
+            # 2) regular difference only
+            fc_level[, age] <- exp(last_log[age] + cumsum(fc_mat[, age]))
+          } else if (d == 0 & D == 1) {
+            # 3) seasonal difference only
+            hist_window <- log(y[(nrow(y)-51):nrow(y), age])  # last 52 weeks
+            log_preds <- numeric(52)
+            for (t in 1:52) {
+                log_preds[t] <- hist_window[t] + fc_mat[t, age]
+              }
+            fc_level[, age] <- exp(log_preds)
+          } else if (d == 1 & D == 1) {
+            # 4) both regular and seasonal differencing
+            hist_window <- log(y[(nrow(y)-52):nrow(y), age]) # last 53 weeks
+            y_season_diff <- numeric(52)
+            y_forecast <- numeric(52)
+            for (t in 1:52) {
+              if (t == 1) {
+                y_season_diff[t] <- hist_window[53] + fc_mat[t, age]  # last observed seasonal-diff
+                y_forecast[t] <- y_season_diff[t] + hist_window[2] - hist_window[1]
+              } else {
+                y_season_diff[t] <- y_season_diff[t-1] + fc_mat[t, age]
+                y_forecast[t] <- y_season_diff[t] + hist_window[t+1] - hist_window[t]
+              }
+            }
+            fc_level[, age] <- exp(y_forecast)
+          }
+        }
+        
+        window_forecasts[[c]] <- fc_level
+    }
+    all_forecasts[[i]] <- window_forecasts
+    
+    # calculating the mape
+    forecast_error_individual_var <- create_matrices_list(length(train_list), dim(train_list[[c]])[2], 52)
+    rowsum_forecast_error_var <- create_matrices_list(length(train_list), 1, 52)
+    forecast_error_var <- create_matrices_list(length(train_list), 1, 12)
+    
+    test_mortality <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+    difference_var <- Map(`-`, all_forecasts[[i]], test_mortality)
+    abs_difference_var <- lapply(difference_var, function(diff) abs(diff))
+    forecast_error_individual_var <- Map(`/`, abs_difference_var, test_mortality)
+    
+    rowsum_forecast_error_var <- lapply(forecast_error_individual_var, function(error) rowSums(error))
+    
+    for(m in 1:length(train_list)){
+      for(n in 1:12){
+        forecast_error_var[[m]][n] <- sum(rowsum_forecast_error_var[[m]][1:week_indicator[n+1]])/(dim(train_list[[c]])[2]*week_indicator[n+1])
+      }
+    }
+    
+    error_array <- array(unlist(forecast_error_var), dim = c(12, 1, length(forecast_error_var)))
+    mean_error <- apply(error_array, 1, mean)
+    mean_error <- matrix(mean_error, nrow = 12, ncol = 1)
+    all_mape[[i]] <- mean_error
+}
+
+# find the mean
+mean_mape_var <- Reduce("+", all_mape)/length(all_mape)
+```
+
+
+
+# R1: multi-population global VAR
+```{r}
+library(GVARX)
+
+# Pre-allocate
+all_mape_gvar <- vector("list", 10)
+all_forecasts_gvar <- vector("list", 10)
+
+for(i in 1:10){
+  train_list <- lapply(mr_list_v3, function(x) as.matrix(x[1:training_period[i], ]))
+  train_list[[1]] <- 1 / train_list[[1]]
+  train_list[[18]] <- 1 / train_list[[18]]
+  train_list_log <- lapply(train_list, log)
+  
+  d_common <- 1
+  D_common <- 1
+  train_list_diff <- lapply(train_list_log, function(y_ts){
+    y_diff <- diff(y_ts, differences = d_common)
+    y_diff <- diff(y_diff, lag = 52, differences = D_common)
+    return(na.omit(y_diff))
+  })
+  
+  
+  
+  # create panel data
+  panel_df <- data.frame()
+
+  N <- length(train_list_diff)
+  T_diff <- nrow(train_list_diff[[1]])
+  K <- ncol(train_list_diff[[1]])
+  
+  for(c in 1:N){
+    df_c <- as.data.frame(train_list_diff[[c]])
+    df_c$Time <- date[54:training_period[i]]
+    df_c$ID <- c  # country index
+    panel_df <- rbind(panel_df, df_c)
+  }
+  panel_df <- panel_df[, c("ID", "Time", colnames(df_c)[1:K])]
+
+  
+  
+  
+  # Construct the weight
+  W <- matrix(1/(N-1), nrow = N, ncol = N)
+  diag(W) <- 0
+  
+  # fit the Global VAR model
+  gvar_model <- GVARest(data = panel_df, lag.max = 10, type = "const", ic="HQ", weight.matrix = W)
+  gvar_GF <- GVAR_GF(data = panel_df, p=gvar_model$p, type = "const", ic="HQ", weight.matrix = W)
+  
+  # forecast
+  K_total <- nrow(last_obs)
+  a0 <- numeric(K_total)
+  p_max <- if(!is.null(gvar_GF$G2)) 2 else 1
+  for(c in 1:N){
+    coefs_c <- coef(gvar_model$gvar[[c]])  # list of matrices, one per domestic variable
+    
+    for(age_idx in 1:K){
+      var_name <- names(coefs_c)[age_idx]       # e.g., "X1.75.84"
+      const_value <- coefs_c[[var_name]]["const", "Estimate"]
+      
+      # Position in stacked vector
+      row_index <- (c-1)*K + age_idx
+      a0[row_index] <- const_value
+    }
+  }
+  
+  last_obs <- matrix(NA, nrow=K_total, ncol=p_max)
+  for(c in 1:N){
+    for(age in 1:K){
+      row_index <- (c-1)*K + age
+      last_obs[row_index, 1] <- train_list_diff[[c]][T_diff, age]       # X_t
+      if(p_max==2){
+        last_obs[row_index, 2] <- train_list_diff[[c]][T_diff-1, age]  # X_{t-1}
+      }
+    }
+  }
+  
+  G0 <- gvar_GF$G0
+  G1 <- gvar_GF$G1
+  F1 <- gvar_GF$F1
+  G2 <- if(!is.null(gvar_GF$G2)) gvar_GF$G2 else matrix(0, K_total, K_total)
+  F2 <- if(!is.null(gvar_GF$F2)) gvar_GF$F2 else matrix(0, K_total, K_total)
+  horizon <- 52
+  seasonal_lag <- 52
+  countries_inverted <- c(1,18)  # AUS/NZL
+  
+  G0_inv <- solve(G0)
+  
+  
+  ## actual forecasting
+  X_forecast <- matrix(NA, nrow=K_total, ncol=horizon)
+  X_t   <- last_obs[,1]
+  X_t_1 <- if(p_max==2) last_obs[,2] else rep(0, K_total)
+  
+  for(h in 1:horizon){
+    # Foreign lags (weighted sum of other countries)
+    X_foreign_lag1 <- kronecker(W, diag(K)) %*% X_t
+    X_foreign_lag2 <- kronecker(W, diag(K)) %*% X_t_1
+    
+    # Forecast next step
+    X_next <- G0_inv %*% a0 +
+              G0_inv %*% G1 %*% X_t +
+              G0_inv %*% G2 %*% X_t_1
+    
+    # Store forecast
+    X_forecast[,h] <- X_next
+    
+    # Update lags
+    if(p_max==2){
+      X_t_1 <- X_t
+    }
+    X_t <- X_next
+  }
+  
+  # convert back to original mortality rate
+  forecast_list <- vector("list", N)
+  for (c in 1:N) {
+    y <- train_list[[c]]          
+    ylog <- train_list_log[[c]]   
+    T0 <- nrow(ylog)
+    
+    fc_mat <- matrix(NA, nrow = horizon, ncol = K)
+    
+    for (age in 1:K) {
+      row_index <- (c-1)*K + age
+      fc_mat[, age] <- X_forecast[row_index, ]   # model output for this variable
+    }
+    
+    fc_level <- matrix(NA, nrow = horizon, ncol = K)
+    for (age in 1:K) {
+      # 53-week history window in log-scale
+      hist_window <- ylog[(T0-horizon):T0, age]   # length 53 (index 1...53)
+      
+      y_season_diff <- numeric(horizon)  
+      y_forecast <- numeric(horizon)
+      
+      for (t in 1:horizon) {
+        if (t == 1) {
+          y_season_diff[t] <- hist_window[53] + fc_mat[t, age]
+          y_forecast[t] <- y_season_diff[t] + hist_window[2] - hist_window[1]
+        } else {
+          y_season_diff[t] <- y_season_diff[t-1] + fc_mat[t, age]
+          y_forecast[t] <- y_season_diff[t] + hist_window[t+1] - hist_window[t]
+        }
+      }
+      
+      if (c %in% countries_inverted) {
+        fc_level[, age] <- 1 / exp(y_forecast)
+      } else {
+        fc_level[, age] <- exp(y_forecast)
+      }
+    }
+    forecast_list[[c]] <- fc_level
+  }
+  
+  all_forecasts_gvar[[i]] <- forecast_list
+    
+  # calculating the mape
+  forecast_error_individual_gvar <- create_matrices_list(length(train_list), dim(train_list[[c]])[2], 52)
+  rowsum_forecast_error_gvar <- create_matrices_list(length(train_list), 1, 52)
+  forecast_error_gvar <- create_matrices_list(length(train_list), 1, 12)
+    
+  test_mortality <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  difference_gvar <- Map(`-`, all_forecasts_gvar[[i]], test_mortality)
+  abs_difference_gvar <- lapply(difference_gvar, function(diff) abs(diff))
+  forecast_error_individual_gvar <- Map(`/`, abs_difference_gvar, test_mortality)
+    
+  rowsum_forecast_error_gvar <- lapply(forecast_error_individual_gvar, function(error) rowSums(error))
+    
+  for(m in 1:length(train_list)){
+    for(n in 1:12){
+      forecast_error_gvar[[m]][n] <- sum(rowsum_forecast_error_gvar[[m]][1:week_indicator[n+1]])/(dim(train_list[[c]])[2]*week_indicator[n+1])
+    }
+  }
+    
+  error_array_gvar <- array(unlist(forecast_error_gvar), dim = c(12, 1, length(forecast_error_gvar)))
+  mean_error_gvar <- apply(error_array_gvar, 1, mean)
+  mean_error_gvar <- matrix(mean_error_gvar, nrow = 12, ncol = 1)
+  all_mape_gvar[[i]] <- mean_error_gvar
+}
+
+mean_mape_gvar <- Reduce("+", all_mape_gvar)/length(all_mape_gvar)
+```
+
+
+
+# look at the insights of ax, bx, kt
+```{r}
+# GBLL
+## first time
+### ax
+gbll_1st_ax <- sapply(fitted_results_GBLL[[1]]$ax, function(x) x[1,])
+gbll_1st_ax_common <- as.matrix(gbll_1st_ax[,1])
+gbll_1st_ax <- gbll_1st_ax[,-1]
+colnames(gbll_1st_ax) <- c(read_excel_name_v3)
+rownames(gbll_1st_ax) <- c("15-64", "65-74", "75-84", "85+")
+gbll_1st_ax_df <- melt(gbll_1st_ax, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_17a <- ggplot(gbll_1st_ax_df, aes(x = Age_group, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Age group",
+       y = expression(a[x]),
+       color = "Country",
+       title = "First iteration country-specific trends")+ theme(legend.position = "bottom",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        legend.title = element_text(size = 14),   # Legend title size
+        legend.text = element_text(size = 12)) + guides(color = guide_legend(ncol = 10)) 
+
+plot_17 <-  plot_17a +  theme(legend.position = "none")
+
+colnames(gbll_1st_ax_common) <- c("Common")
+rownames(gbll_1st_ax_common) <- c("15-64", "65-74", "75-84", "85+")
+gbll_1st_ax_common_df <- melt(gbll_1st_ax_common, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_44 <- ggplot(gbll_1st_ax_common_df, aes(x = Age_group, y = Value, group=1)) +
+  geom_line() + geom_point() + 
+  labs(x = "Age group",
+       y = expression(a[x]),
+       title = "First iteration common trends") +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+
+
+### bx
+gbll_1st_bx <- sapply(fitted_results_GBLL[[1]]$bx, function(x) x[1,])
+gbll_1st_bx_common <- as.matrix(gbll_1st_bx[,1])
+gbll_1st_bx <- gbll_1st_bx[,-1]
+colnames(gbll_1st_bx) <- c(read_excel_name_v3)
+rownames(gbll_1st_bx) <- c("15-64", "65-74", "75-84", "85+")
+gbll_1st_bx_df <- melt(gbll_1st_bx, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_18 <- ggplot(gbll_1st_bx_df, aes(x = Age_group, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Age group",
+       y = expression(b[x]),
+       color = "Country") +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12))
+
+colnames(gbll_1st_bx_common) <- c("Common")
+rownames(gbll_1st_bx_common) <- c("15-64", "65-74", "75-84", "85+")
+gbll_1st_bx_common_df <- melt(gbll_1st_bx_common, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_45 <- ggplot(gbll_1st_bx_common_df, aes(x = Age_group, y = Value, group=1)) +
+  geom_line() + geom_point() + 
+  labs(x = "Age group",
+       y = expression(b[x])) +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12)) + ylim(0.1, 0.4)
+
+
+
+
+### kt
+gbll_1st_kt <- sapply(fitted_results_GBLL[[1]]$kapa, function(x) x[,1])
+gbll_1st_kt_common <- as.matrix(gbll_1st_kt[,1])
+gbll_1st_kt <- gbll_1st_kt[,-1]
+colnames(gbll_1st_kt) <- c(read_excel_name_v3)
+rownames(gbll_1st_kt) <- as.character(date[1:208])
+gbll_1st_kt_df <- melt(gbll_1st_kt, varnames = c("Date", "Country"), value.name = "Value")
+gbll_1st_kt_df$Date <- as.Date(gbll_1st_kt_df$Date, format = "%Y-%m-%d")
+plot_19 <- ggplot(gbll_1st_kt_df, aes(x = Date, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Date",
+       y = expression(kappa[t]),
+       color = "Country") + scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  )+
+  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12))
+      
+
+
+### common kt
+colnames(gbll_1st_kt_common) <- c("Common")
+rownames(gbll_1st_kt_common) <- as.character(date[1:208])
+gbll_1st_kt_common_df <- melt(gbll_1st_kt_common, varnames = c("Date", "Country"), value.name = "Value")
+gbll_1st_kt_common_df$Date <- as.Date(gbll_1st_kt_common_df$Date, format = "%Y-%m-%d")
+plot_29 <- ggplot(gbll_1st_kt_common_df, aes(x = Date, y = Value)) +
+  geom_line() +
+  labs(x = "Date",
+       y = expression(kappa[t])) + scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  )+
+  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12))
+
+
+## second time
+### ax
+gbll_2nd_ax <- sapply(fitted_results_GBLL[[1]]$ax, function(x) x[2,])
+gbll_2nd_ax_common <- as.matrix(gbll_2nd_ax[,1])
+gbll_2nd_ax <- gbll_2nd_ax[,-1]
+colnames(gbll_2nd_ax) <- c(read_excel_name_v3)
+rownames(gbll_2nd_ax) <- c("15-64", "65-74", "75-84", "85+")
+gbll_2nd_ax_df <- melt(gbll_2nd_ax, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_20 <- ggplot(gbll_2nd_ax_df, aes(x = Age_group, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Age group",
+       y = expression(a[x]),
+       color = "Country",
+       title = "Second iteration country-specific trends")+ theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+colnames(gbll_2nd_ax_common) <- c("Common")
+rownames(gbll_2nd_ax_common) <- c("15-64", "65-74", "75-84", "85+")
+gbll_2nd_ax_common_df <- melt(gbll_2nd_ax_common, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_46 <- ggplot(gbll_2nd_ax_common_df, aes(x = Age_group, y = Value, group=1)) +
+  geom_line(color = "steelblue4") + geom_point(color = "steelblue4") + 
+  labs(x = "Age group",
+       y = expression(a[x]),
+       title = "Second iteration common trends") +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+
+### bx
+gbll_2nd_bx <- sapply(fitted_results_GBLL[[1]]$bx, function(x) x[2,])
+gbll_2nd_bx_common <- as.matrix(gbll_2nd_bx[,1])
+gbll_2nd_bx <- gbll_2nd_bx[,-1]
+colnames(gbll_2nd_bx) <- c(read_excel_name_v3)
+rownames(gbll_2nd_bx) <- c("15-64", "65-74", "75-84", "85+")
+gbll_2nd_bx_df <- melt(gbll_2nd_bx, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_21 <- ggplot(gbll_2nd_bx_df, aes(x = Age_group, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Age group",
+       y = expression(b[x]),
+       color = "Country") +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+
+colnames(gbll_2nd_bx_common) <- c("Common")
+rownames(gbll_2nd_bx_common) <- c("15-64", "65-74", "75-84", "85+")
+gbll_2nd_bx_common_df <- melt(gbll_2nd_bx_common, varnames = c("Age_group", "Country"), value.name = "Value")
+plot_47 <- ggplot(gbll_2nd_bx_common_df, aes(x = Age_group, y = Value, group=1)) +
+  geom_line(color = "steelblue4") + geom_point(color = "steelblue4") + 
+  labs(x = "Age group",
+       y = expression(b[x])) +  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12))
+
+
+### kt
+gbll_2nd_kt <- sapply(fitted_results_GBLL[[1]]$kapa, function(x) x[,2])
+gbll_2nd_kt_common <- as.matrix(gbll_2nd_kt[,1])
+gbll_2nd_kt <- gbll_2nd_kt[,-1]
+colnames(gbll_2nd_kt) <- c(read_excel_name_v3)
+rownames(gbll_2nd_kt) <- as.character(date[1:208])
+gbll_2nd_kt_df <- melt(gbll_2nd_kt, varnames = c("Date", "Country"), value.name = "Value")
+gbll_2nd_kt_df$Date <- as.Date(gbll_2nd_kt_df$Date, format = "%Y-%m-%d")
+plot_22 <- ggplot(gbll_2nd_kt_df, aes(x = Date, y = Value, color = Country, group=Country)) +
+  geom_line() +
+  labs(x = "Date",
+       y = expression(kappa[t]),
+       color = "Country") + scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  )+ theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+
+### common kt
+colnames(gbll_2nd_kt_common) <- c("Common")
+rownames(gbll_2nd_kt_common) <- as.character(date[1:208])
+gbll_2nd_kt_common_df <- melt(gbll_2nd_kt_common, varnames = c("Date", "Country"), value.name = "Value")
+gbll_2nd_kt_common_df$Date <- as.Date(gbll_2nd_kt_common_df$Date, format = "%Y-%m-%d")
+plot_30 <- ggplot(gbll_2nd_kt_common_df, aes(x = Date, y = Value)) +
+  geom_line(color = "steelblue4") +
+  labs(x = "Date",
+       y = expression(kappa[t])) + scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  )+
+  theme(legend.position = "none",
+        axis.title.x = element_text(size = 14),  # x-axis label
+        axis.title.y = element_text(size = 14),  # y-axis label
+        axis.text.x = element_text(size = 12),   # x-axis ticks
+        axis.text.y = element_text(size = 12))
+
+
+plot_68 <- grid.arrange(plot_44, plot_46, plot_45, plot_47, plot_29, plot_30,  ncol = 2, nrow = 3)
+ggsave("plot_68.png", plot = plot_68, width = 40, height = 20, dpi = 500, units = "cm")
+
+plot_69 <- grid.arrange(plot_17, plot_20, plot_18, plot_21, plot_19, plot_22, get_legend(plot_17a), ncol = 2, nrow = 4, heights=c(5,5,5,2), layout_matrix = rbind(c(1,2), c(3,4), c(5,6), c(7,7)))
+ggsave("GBLL_components_country.pdf", plot = plot_69, width = 15, height = 8, dpi = 300)
+```
+
+
+## look at the residuals 
+```{r}
+# LL
+plot(as.matrix(mr_list_v3[[25]][1:208,1]) - fitted_results_LL[[1]]$fitted_value[[25]][,1])
+lines(as.matrix(mr_list_v3[[25]][1:208,1]) - fitted_results_LL[[1]]$fitted_value[[25]][,1])
+
+# HBY
+plot(as.matrix(mr_list_v3[[5]][1:208,1]) - fitted_results_HBY[[1]]$fitted_value[[5]][,1])
+lines(as.matrix(mr_list_v3[[5]][1:208,1]) - fitted_results_HBY[[1]]$fitted_value[[5]][,1])
+
+# GBLL
+plot(as.matrix(mr_list_v3[[5]][1:208,1]) - fitted_results_GBLL[[1]]$fitted_value[[5]][,1])
+lines(as.matrix(mr_list_v3[[5]][1:208,1]) - fitted_results_GBLL[[1]]$fitted_value[[5]][,1])
+
+
+
+### need to manually flip the fitted_value for AUS & NZD
+Box.test(as.matrix(mr_list_v3[[20]][1:208,1]) - fitted_results_LL[[1]]$fitted_value[[20]][,1], lag = 52, type = "Ljung-Box")
+
+Box.test(as.matrix(mr_list_v3[[20]][1:208,1]) - fitted_results_HBY[[1]]$fitted_value[[20]][,1], lag = 52, type = "Ljung-Box")
+
+Box.test(as.matrix(mr_list_v3[[2]][1:208,1]) - fitted_results_GBLL[[1]]$fitted_value[[2]][,1], lag = 52, type = "Ljung-Box")
+```
+
+
+## plot the chosen residual
+```{r}
+# LL -> choose Canada (#5)
+canada_LL_residual <- as.data.frame(mr_list_v3[[5]][1:208,]) - fitted_results_LL[[1]]$fitted_value[[5]]
+
+## AG1
+plot_9 <- ggplot(canada_LL_residual, aes(x = date[1:208], y = `15-64`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "15-64 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12))   
+
+
+## AG2
+plot_10 <- ggplot(canada_LL_residual, aes(x = date[1:208], y = `65-74`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "65-74 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+
+## AG3
+plot_11 <- ggplot(canada_LL_residual, aes(x = date[1:208], y = `75-84`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "75-84 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+
+## AG4
+plot_12 <- ggplot(canada_LL_residual, aes(x = date[1:208], y = `85+`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "85+ years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+plot_63 <- grid.arrange(plot_9, plot_10, plot_11, plot_12, ncol = 2, nrow = 2)
+ggsave("plot_63.png", plot = plot_63, width = 40, height = 15, dpi = 500, units = "cm")
+
+
+
+
+
+# HBY -> choose Canada (#5)
+canada_HBY_residual <- as.data.frame(mr_list_v3[[5]][1:208,]) - fitted_results_HBY[[1]]$fitted_value[[5]]
+
+## AG1
+plot_13 <- ggplot(canada_HBY_residual, aes(x = date[1:208], y = `15-64`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "15-64 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+
+## AG2
+plot_14 <- ggplot(canada_HBY_residual, aes(x = date[1:208], y = `65-74`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "65-74 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+
+## AG3
+plot_15 <- ggplot(canada_HBY_residual, aes(x = date[1:208], y = `75-84`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "75-84 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+
+## AG4
+plot_16 <- ggplot(canada_HBY_residual, aes(x = date[1:208], y = `85+`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "85+ years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+                              axis.title.x = element_text(size = 14),  # x-axis label
+                              axis.title.y = element_text(size = 14),  # y-axis label
+                              axis.text.x = element_text(size = 12),   # x-axis ticks
+                              axis.text.y = element_text(size = 12)
+  )
+
+plot_64 <- grid.arrange(plot_13, plot_14, plot_15, plot_16, ncol = 2, nrow = 2)
+ggsave("plot_64.png", plot = plot_64, width = 40, height = 15, dpi = 500, units = "cm")
+
+
+
+
+# GBLL -> choose Canada (#5)
+canada_GBLL_residual <- as.data.frame(mr_list_v3[[5]][1:208,]) - fitted_results_GBLL[[1]]$fitted_value[[5]]
+
+## AG1
+plot_36 <- ggplot(canada_GBLL_residual, aes(x = date[1:208], y = `15-64`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "15-64 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+
+## AG2
+plot_37 <- ggplot(canada_GBLL_residual, aes(x = date[1:208], y = `65-74`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "65-74 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+
+## AG3
+plot_38 <- ggplot(canada_GBLL_residual, aes(x = date[1:208], y = `75-84`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "75-84 years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+
+## AG4
+plot_39 <- ggplot(canada_GBLL_residual, aes(x = date[1:208], y = `85+`)) +
+  geom_line() +  # Draw lines for each country
+  labs(x = "Date",
+       title = "85+ years old",
+       y = "Residual") +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019")
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+grid.arrange(plot_36, plot_37, plot_38, plot_39, ncol = 2, nrow = 2)
+```
+
+
+
+# Mean value for each age group
+```{r}
+# LL
+all_errors_LL <- unlist(individual_error_LL, recursive = FALSE)
+combined_array_LL <- simplify2array(all_errors_LL)
+mean_error_AG_LL <- apply(combined_array_LL, c(1, 2), mean)
+
+# HBY
+all_errors_HBY <- unlist(individual_error_HBY, recursive = FALSE)
+combined_array_HBY <- simplify2array(all_errors_HBY)
+mean_error_AG_HBY <- apply(combined_array_HBY, c(1, 2), mean)
+
+# GBLL
+all_errors_GBLL <- unlist(individual_error_GBLL, recursive = FALSE)
+combined_array_GBLL <- simplify2array(all_errors_GBLL)
+mean_error_AG_GBLL <- apply(combined_array_GBLL, c(1, 2), mean)
+```
+
+
+
+
+# most improved countries
+```{r}
+# GBLL - LL
+diff_LL_GBLL <- mapply(function(A, B) B-A, mean_error_country(error_GBLL), mean_error_country(error_LL), SIMPLIFY=FALSE)
+matrix_diff_LL_GBLL <- do.call(cbind, diff_LL_GBLL)
+colnames(matrix_diff_LL_GBLL) <- read_excel_name_v3
+rownames(matrix_diff_LL_GBLL) <- c(1:12)
+matrix_diff_LL_GBLL <- as.data.frame(matrix_diff_LL_GBLL)
+matrix_diff_LL_GBLL$Horizon <- rownames(matrix_diff_LL_GBLL)
+matrix_diff_LL_GBLL_df <- melt(matrix_diff_LL_GBLL, id.vars = "Horizon", variable.name = "Country", value.name = "Value")
+matrix_diff_LL_GBLL_df$Horizon <- factor(matrix_diff_LL_GBLL_df$Horizon, levels = 1:12)
+
+plot_33 <- ggplot(matrix_diff_LL_GBLL_df, aes(x = Country, y = Horizon, fill = Value)) +
+  geom_tile() +  # Creates the tiles of the heatmap
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0) +  # Color gradient from blue (negative) to red (positive)
+  labs(title = "LL to GBLL", x = "Country", y = "Horizon", fill = "Improvement") +  # Labels
+  theme_minimal() +  # A clean theme
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5)) 
+
+# GBLL - HBY
+diff_HBY_GBLL <- mapply(function(A, B) B-A, mean_error_country(error_GBLL), mean_error_country(error_HBY), SIMPLIFY=FALSE)
+matrix_diff_HBY_GBLL <- do.call(cbind, diff_HBY_GBLL)
+colnames(matrix_diff_HBY_GBLL) <- read_excel_name_v3
+rownames(matrix_diff_HBY_GBLL) <- c(1:12)
+matrix_diff_HBY_GBLL <- as.data.frame(matrix_diff_HBY_GBLL)
+matrix_diff_HBY_GBLL$Horizon <- rownames(matrix_diff_HBY_GBLL)
+matrix_diff_HBY_GBLL_df <- melt(matrix_diff_HBY_GBLL, id.vars = "Horizon", variable.name = "Country", value.name = "Value")
+matrix_diff_HBY_GBLL_df$Horizon <- factor(matrix_diff_HBY_GBLL_df$Horizon, levels = 1:12)
+
+plot_40 <- ggplot(matrix_diff_HBY_GBLL_df, aes(x = Country, y = Horizon, fill = Value)) +
+  geom_tile() +  # Creates the tiles of the heatmap
+  scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0) +  # Color gradient from blue (negative) to red (positive)
+  labs(title = "HBY to GBLL", x = "Country", y = "Horizon", fill = "Improvement") +  # Labels
+  theme_minimal() +  # A clean theme
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5)) 
+
+
+## combine all the plots together
+plot_65 <- grid.arrange(plot_33, plot_40, ncol = 2, nrow = 1)
+ggsave("plot_65.png", plot = plot_65, width = 40, height = 15, dpi = 500, units = "cm")
+```
+
+
+
+3. Clustering method 1 (on raw data)
+# Do LC on each country and extract the kt
+```{r}
+overall_lc_kapa_v3 <- matrix(0, nrow = 260, ncol = length(read_excel_name_v3))
+for(i in 1:length(read_excel_name_v3)){
+  overall_lc_kapa_v3[,i] <- lc(log(data_list_v3[[i]][,3:6]))$kapa
+}
+
+lc_kapa_ts_v3 <- ts(overall_lc_kapa_v3, frequency = 52)
+```
+
+# Find the clusters
+```{r}
+raw_lc_kapa_ts_v3 <- t(lc_kapa_ts_v3)
+raw_lc_kapa_ts_NH_v3 <- raw_lc_kapa_ts_v3[-c(1,18),]
+
+
+# Find the optimal no. of cluster
+## Elbow method
+set.seed(1019)
+wcss <- numeric(10)
+for (k in 1:10) {
+  kmeans_model <- kmeans(raw_lc_kapa_ts_NH_v3, centers = k, nstart = 25)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+plot(1:10, wcss, type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Within-cluster sum of squares", main = "Elbow Method")
+
+
+
+## Silhouette Method
+sil_width <- numeric(10)
+for (k in 2:10) {
+  kmeans_model <- kmeans(raw_lc_kapa_ts_NH_v3, centers = k, nstart = 25)
+  sil <- silhouette(kmeans_model$cluster, dist(raw_lc_kapa_ts_NH_v3))
+  sil_width[k] <- mean(sil[, 3])
+}
+
+plot(2:10, sil_width[-1], type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Average Silhouette Width", main = "Silhouette Method")
+
+
+
+
+# Apply the optimal no. of cluster
+raw_lc_kapa_ts_NH_v3_clusters  <- raw_lc_kapa_ts_NH_v3  %>%
+  kmeans(centers = 2, nstart = 25)
+
+raw_lc_kapa_ts_NH_v3_clusters$cluster["Series 1"] <- 3
+raw_lc_kapa_ts_NH_v3_clusters$cluster["Series 18"] <- 3
+ordered_raw_lc_kapa_ts_NH_v3 <- raw_lc_kapa_ts_NH_v3_clusters$cluster[order(as.numeric(gsub("Series ", "", names(raw_lc_kapa_ts_NH_v3_clusters$cluster))))]
+
+# cluster result
+lapply(1:3, \(i) read_excel_name_v3[ordered_raw_lc_kapa_ts_NH_v3 == i])
+```
+
+## draw the mean kt based on clusters 
+```{r}
+lc_kapa_raw_v3_df <- as.data.frame(lc_kapa_ts_v3)
+colnames(lc_kapa_raw_v3_df) <- read_excel_name_v3
+lc_kapa_raw_v3_c1 <- lc_kapa_raw_v3_df[,read_excel_name_v3[which(ordered_raw_lc_kapa_ts_NH_v3 == 1)]]
+lc_kapa_raw_v3_c2 <- lc_kapa_raw_v3_df[,read_excel_name_v3[which(ordered_raw_lc_kapa_ts_NH_v3 == 2)]]
+lc_kapa_raw_v3_c3 <- lc_kapa_raw_v3_df[,read_excel_name_v3[which(ordered_raw_lc_kapa_ts_NH_v3 == 3)]]
+
+lc_kapa_raw_v3_c1_mean <- as.data.frame(rowMeans(lc_kapa_raw_v3_c1, na.rm = TRUE))
+lc_kapa_raw_v3_c2_mean <- as.data.frame(rowMeans(lc_kapa_raw_v3_c2, na.rm = TRUE))
+lc_kapa_raw_v3_c3_mean <- as.data.frame(rowMeans(lc_kapa_raw_v3_c3, na.rm = TRUE))
+
+lc_kapa_raw_v3_mean <- cbind(lc_kapa_raw_v3_c1_mean, lc_kapa_raw_v3_c2_mean, lc_kapa_raw_v3_c3_mean)
+lc_kapa_raw_v3_mean$Time <- date
+colnames(lc_kapa_raw_v3_mean) <- c("C1 mean", "C2 mean", "C3 mean", "Time")
+
+
+
+lc_kapa_raw_v3_mean_df <- melt(lc_kapa_raw_v3_mean, id.vars = "Time", variable.name = "Cluster", value.name = "Value")
+plot_60 <- ggplot(lc_kapa_raw_v3_mean_df, aes(x = Time, y = Value, color = Cluster, group=Cluster)) +
+  geom_line() + ylim(-0.6, 1.3) + 
+  labs(x = "Date",
+       y = expression(kappa[t]),
+       color = "Cluster",
+       title = "Mean value of time trends by clusters") + 
+  theme(legend.position = "right", legend.direction = "vertical") +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+  scale_x_date(
+    breaks = as.Date(c("2015-01-01", "2016-01-01", "2017-01-01", "2018-01-01", "2019-01-01", "2020-01-01")),
+    labels = c("2015", "2016", "2017", "2018", "2019", "2020")
+  )
+ggsave("plot_60.png", plot = plot_60, width = 20, height = 8, dpi = 500, units = "cm")
+```
+
+
+# Results
+```{r}
+# create lists to store the outputs for each expanding window
+fitted_results_LL_m1_combined <- list()
+error_LL_m1_combined <- list()
+individual_error_LL_m1_combined <- list()
+
+fitted_results_HBY_m1_combined <- list()
+error_HBY_m1_combined <- list()
+individual_error_HBY_m1_combined <- list()
+
+fitted_results_GBLL_m1_combined <- list()
+error_GBLL_m1_combined <- list()
+individual_error_GBLL_m1_combined <- list()
+
+# do 10 times of expanding window for each of the three clusters
+for(j in 1:3){
+  train_mr_list_v3_m1 <- list()
+  test_mr_list_v3_m1 <- list()
+  
+  # create lists to store the outputs for each expanding window
+  fitted_results_LL_m1 <- list()
+  error_LL_m1 <- list()
+  individual_error_LL_m1 <- list()
+
+  fitted_results_HBY_m1 <- list()
+  error_HBY_m1 <- list()
+  individual_error_HBY_m1 <- list()
+
+  fitted_results_GBLL_m1 <- list()
+  error_GBLL_m1 <- list()
+  individual_error_GBLL_m1 <- list()
+  
+  for(i in 1:10){
+    index <- as.numeric(which(ordered_raw_lc_kapa_ts_NH_v3 == j))
+    # prepare the data needed
+    for(k in 1:length(index)){
+      matrix <- as.matrix(data_list_v3[[index[k]]][1:training_period[i],3:6])
+      train_mr_list_v3_m1[[k]] <- matrix
+      test_mr_list_v3_m1[[k]] <- as.matrix(data_list_v3[[index[k]]][(training_period[i]+1):(training_period[i]+52),3:6])
+    }
+    
+    flip_indicator <- rep(0, length(index))
+    train_mr_list_v3_m1 <- lapply(train_mr_list_v3_m1, log)
+    train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+    test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+    
+    # LL
+    fitted_results_LL_m1[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m1, training_period[i],52,1)
+    forecasted_LL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, fitted_results_LL_m1[[i]]$iteration, 1)
+    error_LL_m1[[i]] <- forecasted_LL_m1$error
+    individual_error_LL_m1[[i]] <- mape_h(length(index),4,forecasted_LL_m1$individual_error,12,week_indicator)
+    
+    # HBY
+    fitted_results_HBY_m1[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M5 C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering M5 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
+    forecasted_HBY_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    error_HBY_m1[[i]] <- forecasted_HBY_m1$error
+    individual_error_HBY_m1[[i]] <- mape_h(length(index),4,forecasted_HBY_m1$individual_error,12,week_indicator)
+    
+    # GBLL
+    fitted_results_GBLL_m1[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m1,training_period[i],52,50)
+    forecasted_GBLL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, fitted_results_GBLL_m1[[i]]$iteration, fitted_results_GBLL_m1[[i]]$gamma)
+    error_GBLL_m1[[i]] <- forecasted_GBLL_m1$error
+    individual_error_GBLL_m1[[i]] <- mape_h(length(index),4,forecasted_GBLL_m1$individual_error,12,week_indicator)
+  }
+  
+  # combine the results across 3 clusters
+  fitted_results_LL_m1_combined[[j]] <- fitted_results_LL_m1
+  error_LL_m1_combined[[j]] <- error_LL_m1
+  individual_error_LL_m1_combined[[j]] <- individual_error_LL_m1
+  
+  fitted_results_HBY_m1_combined[[j]] <- fitted_results_HBY_m1
+  error_HBY_m1_combined[[j]] <- error_HBY_m1
+  individual_error_HBY_m1_combined[[j]] <- individual_error_HBY_m1
+  
+  fitted_results_GBLL_m1_combined[[j]] <- fitted_results_GBLL_m1
+  error_GBLL_m1_combined[[j]] <- error_GBLL_m1
+  individual_error_GBLL_m1_combined[[j]] <- individual_error_GBLL_m1
+}
+
+
+# final mean error
+mean_error_LL_m1 <- apply(simplify2array(flatten(flatten(error_LL_m1_combined))), c(1, 2), mean)
+mean_error_HBY_m1 <- apply(simplify2array(flatten(flatten(error_HBY_m1_combined))), c(1, 2), mean)
+mean_error_GBLL_m1 <- apply(simplify2array(flatten(flatten(error_GBLL_m1_combined))), c(1, 2), mean)
+```
+
+
+
+4. Clustering Method 2 (based on trend slopes)
+```{r}
+lc_kapa_stl_trend_v3 <- matrix(0, nrow = length(read_excel_name_v3), ncol = 1)
+for(i in 1:length(read_excel_name_v3)){
+  trend <- stl(lc_kapa_ts_v3[,i], s.window="periodic")$time.series[,"trend"]
+  fit.trend <- data.frame(trend=trend, t=1:length(trend))
+  lc_kapa_stl_trend_v3[i,1] <- lm(trend ~ t, data = fit.trend)$coefficients[2]
+}
+
+lc_kappa_trend_slope <- lc_kapa_stl_trend_v3
+
+# Find the optimal no. of cluster
+## Elbow method
+set.seed(1019)
+wcss <- numeric(10)
+for (k in 1:10) {
+  kmeans_model <- kmeans(lc_kapa_stl_trend_v3, centers = k, nstart = 25)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+plot(1:10, wcss, type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Within-cluster sum of squares", main = "Elbow Method")
+
+
+
+## Silhouette Method
+sil_width <- numeric(10)
+for (k in 2:10) {
+  kmeans_model <- kmeans(lc_kapa_stl_trend_v3, centers = k, nstart = 25)
+  sil <- silhouette(kmeans_model$cluster, dist(lc_kapa_stl_trend_v3))
+  sil_width[k] <- mean(sil[, 3])
+}
+
+plot(2:10, sil_width[-1], type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Average Silhouette Width", main = "Silhouette Method")
+
+
+
+
+# Apply the optimal no. of cluster
+lc_kapa_stl_trend_v3 <- lc_kapa_stl_trend_v3 %>%
+  kmeans(centers = 3, nstart=25)
+
+# cluster result
+lapply(1:3, \(i) read_excel_name_v3[lc_kapa_stl_trend_v3$cluster == i])
+```
+
+# draw the trend slopes by clusters
+```{r}
+lc_kappa_m2_df <- as.data.frame(lc_kappa_trend_slope)
+colnames(lc_kappa_m2_df) <- "Trend_slope"
+lc_kappa_m2_df$Cluster <- as.matrix(lc_kapa_stl_trend_v3$cluster)
+lc_kappa_m2_df$y <- 0
+lc_kappa_m2_df$name <- name_country_code_v3
+set.seed(20001542)
+lc_kappa_m2_df <- lc_kappa_m2_df %>%
+  group_by(Cluster) %>%
+  mutate(
+    label_y = ifelse(
+      Cluster %in% c(2, 3),
+      y + runif(n(), -0.005, 0.005),
+      y+0.0003
+    )
+  ) %>%
+  ungroup()
+  
+
+# draw the ggplot
+plot_61 <- ggplot(lc_kappa_m2_df, aes(x = Trend_slope, y = y, color = as.factor(Cluster))) +
+  geom_point(size = 2) +
+  geom_segment(aes(x = Trend_slope, xend = Trend_slope, y = y, yend = label_y, color = as.factor(Cluster)), size = 0.2, show.legend = FALSE) +
+  geom_text(aes(y = label_y, label = name), size = 2, hjust = -0.1) +
+  scale_color_brewer(palette = "Set1", name = "Cluster") +
+  labs(
+    title = "Clustering based on slopes of the time trend",
+    x = "Trend Slope",
+    y = NULL
+  ) +
+  theme_gray() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5)
+  ) +
+  ylim(-0.01, 0.01) +
+  xlim(-0.002, 0)
+ggsave("plot_61.png", plot = plot_61, width = 20, height = 8, dpi = 500, units = "cm")
+```
+
+
+# results
+```{r}
+# create lists to store the outputs for each expanding window
+fitted_results_LL_m2_combined <- list()
+error_LL_m2_combined <- list()
+individual_error_LL_m2_combined <- list()
+
+fitted_results_HBY_m2_combined <- list()
+error_HBY_m2_combined <- list()
+individual_error_HBY_m2_combined <- list()
+
+fitted_results_GBLL_m2_combined <- list()
+error_GBLL_m2_combined <- list()
+individual_error_GBLL_m2_combined <- list()
+
+# do 10 times of expanding window for each of the three clusters
+for(j in 1:3){
+  train_mr_list_v3_m2 <- list()
+  test_mr_list_v3_m2 <- list()
+  
+  # create lists to store the outputs for each expanding window
+  fitted_results_LL_m2 <- list()
+  error_LL_m2 <- list()
+  individual_error_LL_m2 <- list()
+
+  fitted_results_HBY_m2 <- list()
+  error_HBY_m2 <- list()
+  individual_error_HBY_m2 <- list()
+
+  fitted_results_GBLL_m2 <- list()
+  error_GBLL_m2 <- list()
+  individual_error_GBLL_m2 <- list()
+  
+  for(i in 1:10){
+    index <- as.numeric(which(lc_kapa_stl_trend_v3$cluster == j))
+    # prepare the data needed
+    for(k in 1:length(index)){
+      matrix <- as.matrix(data_list_v3[[index[k]]][1:training_period[i],3:6])
+      train_mr_list_v3_m2[[k]] <- matrix
+      test_mr_list_v3_m2[[k]] <- as.matrix(data_list_v3[[index[k]]][(training_period[i]+1):(training_period[i]+52),3:6])
+    }
+    
+    flip_indicator <- rep(0, length(index))
+    flip_indicator[index == 1 | index == 18] <- 1
+    which_flip <- which(flip_indicator==1)
+    if(length(which_flip)==0){
+    } else{
+        train_mr_list_v3_m2[[which_flip]] <- 1/train_mr_list_v3_m2[[which_flip]]
+      }
+    train_mr_list_v3_m2 <- lapply(train_mr_list_v3_m2, log)
+    train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+    test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+    
+    # LL
+    fitted_results_LL_m2[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m2, training_period[i],52,1)
+    forecasted_LL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_LL_m2[[i]]$iteration, 1)
+    error_LL_m2[[i]] <- forecasted_LL_m2$error
+    individual_error_LL_m2[[i]] <- mape_h(length(index),4,forecasted_LL_m2$individual_error,12,week_indicator)
+    
+    # HBY
+    fitted_results_HBY_m2[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M2 C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering M2 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
+    forecasted_HBY_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    error_HBY_m2[[i]] <- forecasted_HBY_m2$error
+    individual_error_HBY_m2[[i]] <- mape_h(length(index),4,forecasted_HBY_m2$individual_error,12,week_indicator)
+    
+    # GBLL
+    fitted_results_GBLL_m2[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m2,training_period[i],52,50)
+    forecasted_GBLL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_GBLL_m2[[i]]$iteration, fitted_results_GBLL_m2[[i]]$gamma)
+    error_GBLL_m2[[i]] <- forecasted_GBLL_m2$error
+    individual_error_GBLL_m2[[i]] <- mape_h(length(index),4,forecasted_GBLL_m2$individual_error,12,week_indicator)
+  }
+  
+  # combine the results across 3 clusters
+  fitted_results_LL_m2_combined[[j]] <- fitted_results_LL_m2
+  error_LL_m2_combined[[j]] <- error_LL_m2
+  individual_error_LL_m2_combined[[j]] <- individual_error_LL_m2
+  
+  fitted_results_HBY_m2_combined[[j]] <- fitted_results_HBY_m2
+  error_HBY_m2_combined[[j]] <- error_HBY_m2
+  individual_error_HBY_m2_combined[[j]] <- individual_error_HBY_m2
+  
+  fitted_results_GBLL_m2_combined[[j]] <- fitted_results_GBLL_m2
+  error_GBLL_m2_combined[[j]] <- error_GBLL_m2
+  individual_error_GBLL_m2_combined[[j]] <- individual_error_GBLL_m2
+}
+
+
+# final mean error
+mean_error_LL_m2 <- apply(simplify2array(flatten(flatten(error_LL_m2_combined))), c(1, 2), mean)
+mean_error_HBY_m2 <- apply(simplify2array(flatten(flatten(error_HBY_m2_combined))), c(1, 2), mean)
+mean_error_GBLL_m2 <- apply(simplify2array(flatten(flatten(error_GBLL_m2_combined))), c(1, 2), mean)
+```
+
+
+
+
+
+5. Clustering Method 3 (based on scaled trend slopes and scaled seasonal strength)
+```{r}
+lc_kapa_tsfeatures_v3 <- tsfeatures::tsfeatures(lc_kapa_ts_v3, features = c("stl_features"))
+lc_kapa_tsfeatures_v3 <- data.frame(lc_kapa_tsfeatures_v3)
+lc_kapa_tsfeatures_v3_ts_s_seasonal <- lc_kapa_tsfeatures_v3 %>% select(seasonal_strength)
+lc_kapa_tsfeatures_v3_ts_s <- (lc_kapa_tsfeatures_v3_ts_s_seasonal - min(lc_kapa_tsfeatures_v3_ts_s_seasonal)) / (max(lc_kapa_tsfeatures_v3_ts_s_seasonal) - min(lc_kapa_tsfeatures_v3_ts_s_seasonal))
+lc_kapa_tsfeatures_v3_ts_s$trend_slope_scaled <- (lc_kappa_trend_slope[,1] - min(lc_kappa_trend_slope[,1])) / (max(lc_kappa_trend_slope[,1]) - min(lc_kappa_trend_slope[,1]))
+
+
+# Find the optimal no. of cluster
+## Elbow method
+set.seed(1019)
+wcss <- numeric(10)
+for (k in 1:10) {
+  kmeans_model <- kmeans(lc_kapa_tsfeatures_v3_ts_s, centers = k, nstart = 25)
+  wcss[k] <- kmeans_model$tot.withinss
+}
+
+plot(1:10, wcss, type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Within-cluster sum of squares", main = "Elbow Method")
+
+
+
+## Silhouette Method
+sil_width <- numeric(10)
+for (k in 2:10) {
+  kmeans_model <- kmeans(lc_kapa_tsfeatures_v3_ts_s, centers = k, nstart = 25)
+  sil <- silhouette(kmeans_model$cluster, dist(lc_kapa_tsfeatures_v3_ts_s))
+  sil_width[k] <- mean(sil[, 3])
+}
+
+plot(2:10, sil_width[-1], type = "b", pch = 19, xlab = "Number of Clusters", 
+     ylab = "Average Silhouette Width", main = "Silhouette Method")
+
+
+
+
+# Apply the optimal no. of cluster
+lc_kapa_tsfeatures_v3_ts_s_clusters  <- lc_kapa_tsfeatures_v3_ts_s  %>%
+  kmeans(centers = 3, nstart = 25)
+
+# cluster result
+lapply(1:3, \(i) read_excel_name_v3[lc_kapa_tsfeatures_v3_ts_s_clusters$cluster == i])
+
+
+
+## draw the clusters in ggplot
+lc_kapa_tsfeatures_v3_ts_s$country <- read_excel_name_v3
+lc_kapa_tsfeatures_v3_ts_s$cluster <- lc_kapa_tsfeatures_v3_ts_s_clusters$cluster
+lc_kapa_tsfeatures_v3_ts_s$name <- name_country_code_v3
+plot_54 <- ggplot(lc_kapa_tsfeatures_v3_ts_s, aes(x = trend_slope_scaled, y = seasonal_strength, color = as.factor(cluster))) +
+  geom_point(size = 2) + geom_text(aes(label = name), vjust = -0.7, hjust = 1, size = 2) + 
+  labs(title = "Clustering based on scaled trend slopes and seasonal strength",
+       x = "Trend Slope",
+       y = "Seasonal Strength",
+       color = "Cluster") +
+  theme_grey() + theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5))
+ggsave("plot_54.png", plot = plot_54, width = 20, height = 10, dpi = 500, units = "cm")
+```
+
+
+
+# results
+```{r}
+# create lists to store the outputs for each expanding window
+fitted_results_LL_m3_combined <- list()
+error_LL_m3_combined <- list()
+individual_error_LL_m3_combined <- list()
+
+fitted_results_HBY_m3_combined <- list()
+error_HBY_m3_combined <- list()
+individual_error_HBY_m3_combined <- list()
+
+fitted_results_GBLL_m3_combined <- list()
+error_GBLL_m3_combined <- list()
+individual_error_GBLL_m3_combined <- list()
+
+# do 10 times of expanding window for each of the three clusters
+for(j in 1:3){
+  train_mr_list_v3_m3 <- list()
+  test_mr_list_v3_m3 <- list()
+  
+  # create lists to store the outputs for each expanding window
+  fitted_results_LL_m3 <- list()
+  error_LL_m3 <- list()
+  individual_error_LL_m3 <- list()
+
+  fitted_results_HBY_m3 <- list()
+  error_HBY_m3 <- list()
+  individual_error_HBY_m3 <- list()
+
+  fitted_results_GBLL_m3 <- list()
+  error_GBLL_m3 <- list()
+  individual_error_GBLL_m3 <- list()
+  
+  for(i in 1:10){
+    index <- as.numeric(which(lc_kapa_tsfeatures_v3_ts_s_clusters$cluster == j))
+    # prepare the data needed
+    for(k in 1:length(index)){
+      matrix <- as.matrix(data_list_v3[[index[k]]][1:training_period[i],3:6])
+      train_mr_list_v3_m3[[k]] <- matrix
+      test_mr_list_v3_m3[[k]] <- as.matrix(data_list_v3[[index[k]]][(training_period[i]+1):(training_period[i]+52),3:6])
+    }
+    
+    flip_indicator <- rep(0, length(index))
+    flip_indicator[index == 1 | index == 18] <- 1
+    which_flip <- which(flip_indicator==1)
+    if(length(which_flip)==0){
+    } else{
+        train_mr_list_v3_m3[which_flip] <- lapply(train_mr_list_v3_m3[which_flip], function(mat) {1 / mat})
+    }
+    train_mr_list_v3_m3 <- lapply(train_mr_list_v3_m3, log)
+    train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+    test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+    
+    # LL
+    fitted_results_LL_m3[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m3, training_period[i],52,1)
+    forecasted_LL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, fitted_results_LL_m3[[i]]$iteration, 1)
+    error_LL_m3[[i]] <- forecasted_LL_m3$error
+    individual_error_LL_m3[[i]] <- mape_h(length(index),4,forecasted_LL_m3$individual_error,12,week_indicator)
+    
+    # HBY
+    prefix <- if (j == 1) "M2" else "M4"
+    fitted_results_HBY_m3[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering ", prefix, " C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering ", prefix, " C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
+    forecasted_HBY_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    error_HBY_m3[[i]] <- forecasted_HBY_m3$error
+    individual_error_HBY_m3[[i]] <- mape_h(length(index),4,forecasted_HBY_m3$individual_error,12,week_indicator)
+    
+    # GBLL
+    fitted_results_GBLL_m3[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m3,training_period[i],52,50)
+    forecasted_GBLL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, fitted_results_GBLL_m3[[i]]$iteration, fitted_results_GBLL_m3[[i]]$gamma)
+    error_GBLL_m3[[i]] <- forecasted_GBLL_m3$error
+    individual_error_GBLL_m3[[i]] <- mape_h(length(index),4,forecasted_GBLL_m3$individual_error,12,week_indicator)
+  }
+  
+  # combine the results across 3 clusters
+  fitted_results_LL_m3_combined[[j]] <- fitted_results_LL_m3
+  error_LL_m3_combined[[j]] <- error_LL_m3
+  individual_error_LL_m3_combined[[j]] <- individual_error_LL_m3
+  
+  fitted_results_HBY_m3_combined[[j]] <- fitted_results_HBY_m3
+  error_HBY_m3_combined[[j]] <- error_HBY_m3
+  individual_error_HBY_m3_combined[[j]] <- individual_error_HBY_m3
+  
+  fitted_results_GBLL_m3_combined[[j]] <- fitted_results_GBLL_m3
+  error_GBLL_m3_combined[[j]] <- error_GBLL_m3
+  individual_error_GBLL_m3_combined[[j]] <- individual_error_GBLL_m3
+}
+
+
+# final mean error
+mean_error_LL_m3 <- apply(simplify2array(flatten(flatten(error_LL_m3_combined))), c(1, 2), mean)
+mean_error_HBY_m3 <- apply(simplify2array(flatten(flatten(error_HBY_m3_combined))), c(1, 2), mean)
+mean_error_GBLL_m3 <- apply(simplify2array(flatten(flatten(error_GBLL_m3_combined))), c(1, 2), mean)
+```
+
