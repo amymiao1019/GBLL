@@ -53,21 +53,25 @@ for(i in 1:10){
   
   # LL
   fitted_results_LL[[i]] <- gbll_original(length(read_excel_name_v3), 4, train_mr_list_v3, training_period[i],52,1)
-  forecasted_LL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_LL[[i]]$iteration, 1)
+  forecasted_LL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, 
+                                    test_mr_list_v3, week_indicator, 12, fitted_results_LL[[i]]$iteration, 1)
   error_LL[[i]] <- forecasted_LL$error
   individual_error_LL[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_LL$individual_error,12,week_indicator)
   forecasted_mr_LL[[i]] <- forecasted_LL$forecasted_mortality
   
   # HBY
-  fitted_results_HBY[[i]] <- hby_fit(name_HBY_v3, paste0("30 countries whole MR - EW", i-1, ".txt"), paste0("30 countries whole Exposure - EW", i-1, ".txt"), 6, length(read_excel_name_v3), 4, training_period[i])
-  forecasted_HBY <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_HBY[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, 6, c(1,1,1,1,1,1))
+  fitted_results_HBY[[i]] <- hby_fit(name_HBY_v3, paste0("30 countries whole MR - EW", i-1, ".txt"), paste0("30 countries whole Exposure - EW", i-1, ".txt"), 
+                                     6, length(read_excel_name_v3), 4, training_period[i])
+  forecasted_HBY <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_HBY[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, 
+                                     test_mr_list_v3, week_indicator, 12, 6, c(1,1,1,1,1,1))
   error_HBY[[i]] <- forecasted_HBY$error
   individual_error_HBY[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_HBY$individual_error,12,week_indicator)
   forecasted_mr_HBY[[i]] <- forecasted_HBY$forecasted_mortality
   
   #GBLL
   fitted_results_GBLL[[i]] <- gbll_original(length(read_excel_name_v3),4,train_mr_list_v3,training_period[i],52,50)
-  forecasted_GBLL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_GBLL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, test_mr_list_v3, week_indicator, 12, fitted_results_GBLL[[i]]$iteration, fitted_results_GBLL[[i]]$gamma)
+  forecasted_GBLL <- gbll_forecasting(length(read_excel_name_v3), 4, 52, fitted_results_GBLL[[i]], train_regressor, test_regressor, flip_indicator_whole_v3, 
+                                      test_mr_list_v3, week_indicator, 12, fitted_results_GBLL[[i]]$iteration, fitted_results_GBLL[[i]]$gamma)
   error_GBLL[[i]] <- forecasted_GBLL$error
   individual_error_GBLL[[i]] <- mape_h(length(read_excel_name_v3),4,forecasted_GBLL$individual_error,12,week_indicator)
   forecasted_mr_GBLL[[i]] <- forecasted_GBLL$forecasted_mortality
@@ -263,19 +267,24 @@ for(j in 1:3){
     
     # LL
     fitted_results_LL_m1[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m1, training_period[i],52,1)
-    forecasted_LL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, fitted_results_LL_m1[[i]]$iteration, 1)
+    forecasted_LL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m1[[i]], train_regressor, test_regressor, flip_indicator, 
+                                         test_mr_list_v3_m1, week_indicator, 12, fitted_results_LL_m1[[i]]$iteration, 1)
     error_LL_m1[[i]] <- forecasted_LL_m1$error
     individual_error_LL_m1[[i]] <- mape_h(length(index),4,forecasted_LL_m1$individual_error,12,week_indicator)
     
     # HBY
-    fitted_results_HBY_m1[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M5 C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering M5 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
-    forecasted_HBY_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    fitted_results_HBY_m1[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M1 C", j, " MR - EW", i - 1, ".txt"), 
+                                          paste0("30 countries Clustering M5 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 
+                                          4, training_period[i])
+    forecasted_HBY_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m1[[i]], train_regressor, test_regressor, flip_indicator, 
+                                          test_mr_list_v3_m1, week_indicator, 12, 6, c(1,1,1,1,1,1))
     error_HBY_m1[[i]] <- forecasted_HBY_m1$error
     individual_error_HBY_m1[[i]] <- mape_h(length(index),4,forecasted_HBY_m1$individual_error,12,week_indicator)
     
     # GBLL
     fitted_results_GBLL_m1[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m1,training_period[i],52,50)
-    forecasted_GBLL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m1[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m1, week_indicator, 12, fitted_results_GBLL_m1[[i]]$iteration, fitted_results_GBLL_m1[[i]]$gamma)
+    forecasted_GBLL_m1 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m1[[i]], train_regressor, test_regressor, flip_indicator, 
+                                           test_mr_list_v3_m1, week_indicator, 12, fitted_results_GBLL_m1[[i]]$iteration, fitted_results_GBLL_m1[[i]]$gamma)
     error_GBLL_m1[[i]] <- forecasted_GBLL_m1$error
     individual_error_GBLL_m1[[i]] <- mape_h(length(index),4,forecasted_GBLL_m1$individual_error,12,week_indicator)
   }
@@ -359,19 +368,24 @@ for(j in 1:3){
     
     # LL
     fitted_results_LL_m2[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m2, training_period[i],52,1)
-    forecasted_LL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_LL_m2[[i]]$iteration, 1)
+    forecasted_LL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m2[[i]], train_regressor, test_regressor, flip_indicator, 
+                                         test_mr_list_v3_m2, week_indicator, 12, fitted_results_LL_m2[[i]]$iteration, 1)
     error_LL_m2[[i]] <- forecasted_LL_m2$error
     individual_error_LL_m2[[i]] <- mape_h(length(index),4,forecasted_LL_m2$individual_error,12,week_indicator)
     
     # HBY
-    fitted_results_HBY_m2[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M2 C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering M2 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
-    forecasted_HBY_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    fitted_results_HBY_m2[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M2 C", j, " MR - EW", i - 1, ".txt"), 
+                                          paste0("30 countries Clustering M2 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 
+                                          4, training_period[i])
+    forecasted_HBY_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m2[[i]], train_regressor, test_regressor, flip_indicator, 
+                                          test_mr_list_v3_m2, week_indicator, 12, 6, c(1,1,1,1,1,1))
     error_HBY_m2[[i]] <- forecasted_HBY_m2$error
     individual_error_HBY_m2[[i]] <- mape_h(length(index),4,forecasted_HBY_m2$individual_error,12,week_indicator)
     
     # GBLL
     fitted_results_GBLL_m2[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m2,training_period[i],52,50)
-    forecasted_GBLL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m2[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m2, week_indicator, 12, fitted_results_GBLL_m2[[i]]$iteration, fitted_results_GBLL_m2[[i]]$gamma)
+    forecasted_GBLL_m2 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m2[[i]], train_regressor, test_regressor, flip_indicator, 
+                                           test_mr_list_v3_m2, week_indicator, 12, fitted_results_GBLL_m2[[i]]$iteration, fitted_results_GBLL_m2[[i]]$gamma)
     error_GBLL_m2[[i]] <- forecasted_GBLL_m2$error
     individual_error_GBLL_m2[[i]] <- mape_h(length(index),4,forecasted_GBLL_m2$individual_error,12,week_indicator)
   }
@@ -455,20 +469,24 @@ for(j in 1:3){
     
     # LL
     fitted_results_LL_m3[[i]] <- gbll_original(length(index), 4, train_mr_list_v3_m3, training_period[i],52,1)
-    forecasted_LL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, fitted_results_LL_m3[[i]]$iteration, 1)
+    forecasted_LL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_LL_m3[[i]], train_regressor, test_regressor, flip_indicator, 
+                                         test_mr_list_v3_m3, week_indicator, 12, fitted_results_LL_m3[[i]]$iteration, 1)
     error_LL_m3[[i]] <- forecasted_LL_m3$error
     individual_error_LL_m3[[i]] <- mape_h(length(index),4,forecasted_LL_m3$individual_error,12,week_indicator)
     
     # HBY
-    prefix <- if (j == 1) "M2" else "M4"
-    fitted_results_HBY_m3[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering ", prefix, " C", j, " MR - EW", i - 1, ".txt"), paste0("30 countries Clustering ", prefix, " C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 4, training_period[i])
-    forecasted_HBY_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, 6, c(1,1,1,1,1,1))
+    fitted_results_HBY_m3[[i]] <- hby_fit(name_HBY_v3[index], paste0("30 countries Clustering M3 C", j, " MR - EW", i - 1, ".txt"),  
+                                          paste0("30 countries Clustering M3 C", j, " Exposure - EW", i - 1, ".txt"), 6, length(index), 
+                                          4, training_period[i])
+    forecasted_HBY_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_HBY_m3[[i]], train_regressor, test_regressor, flip_indicator, 
+                                          test_mr_list_v3_m3, week_indicator, 12, 6, c(1,1,1,1,1,1))
     error_HBY_m3[[i]] <- forecasted_HBY_m3$error
     individual_error_HBY_m3[[i]] <- mape_h(length(index),4,forecasted_HBY_m3$individual_error,12,week_indicator)
     
     # GBLL
     fitted_results_GBLL_m3[[i]] <- gbll_original(length(index),4,train_mr_list_v3_m3,training_period[i],52,50)
-    forecasted_GBLL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m3[[i]], train_regressor, test_regressor, flip_indicator, test_mr_list_v3_m3, week_indicator, 12, fitted_results_GBLL_m3[[i]]$iteration, fitted_results_GBLL_m3[[i]]$gamma)
+    forecasted_GBLL_m3 <- gbll_forecasting(length(index), 4, 52, fitted_results_GBLL_m3[[i]], train_regressor, test_regressor, flip_indicator, 
+                                           test_mr_list_v3_m3, week_indicator, 12, fitted_results_GBLL_m3[[i]]$iteration, fitted_results_GBLL_m3[[i]]$gamma)
     error_GBLL_m3[[i]] <- forecasted_GBLL_m3$error
     individual_error_GBLL_m3[[i]] <- mape_h(length(index),4,forecasted_GBLL_m3$individual_error,12,week_indicator)
   }
