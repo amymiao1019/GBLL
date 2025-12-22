@@ -78,6 +78,21 @@ mean_error_LL <- Reduce("+", unlist(error_LL, recursive = FALSE)) / (10*30)
 mean_error_HBY <- Reduce("+", unlist(error_HBY, recursive = FALSE)) / (10*30)
 mean_error_GBLL <- Reduce("+", unlist(error_GBLL, recursive = FALSE)) / (10*30)
 
+# Calculate the mean MAPE for each age group
+## LL
+all_errors_LL <- unlist(individual_error_LL, recursive = FALSE)
+combined_array_LL <- simplify2array(all_errors_LL)
+mean_error_AG_LL <- apply(combined_array_LL, c(1, 2), mean)
+
+## HBY
+all_errors_HBY <- unlist(individual_error_HBY, recursive = FALSE)
+combined_array_HBY <- simplify2array(all_errors_HBY)
+mean_error_AG_HBY <- apply(combined_array_HBY, c(1, 2), mean)
+
+## GBLL
+all_errors_GBLL <- unlist(individual_error_GBLL, recursive = FALSE)
+combined_array_GBLL <- simplify2array(all_errors_GBLL)
+mean_error_AG_GBLL <- apply(combined_array_GBLL, c(1, 2), mean)
 
 
 
