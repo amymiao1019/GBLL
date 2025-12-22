@@ -1,4 +1,4 @@
-# Data preparation
+1. Data preparation
 date <- as.Date("2015-01-08") + 7*seq(0,52*5-1,1)
 week_indicator <- c(0,4,9,13,17,22,26,30,35,39,43,48,52)
 read_excel_name_v3 <- c("Australia", "Austria", "Belgium", "Bulgaria", "Canada", "Croatia", "Czech Republic", "Denmark", "England and Wales", "Finland", 
@@ -22,7 +22,7 @@ for(i in 1:length(read_excel_name_v3)){
 
 
 
-# Do LL, HBY and GBLL for 10-fold expanding windows
+2. Do LL, HBY and GBLL for 10-fold expanding windows
 ## create lists to store the outputs for each expanding window
 fitted_results_LL <- list()
 error_LL <- list()
@@ -77,3 +77,122 @@ for(i in 1:10){
 mean_error_LL <- Reduce("+", unlist(error_LL, recursive = FALSE)) / (10*30)
 mean_error_HBY <- Reduce("+", unlist(error_HBY, recursive = FALSE)) / (10*30)
 mean_error_GBLL <- Reduce("+", unlist(error_GBLL, recursive = FALSE)) / (10*30)
+
+
+
+
+
+3. Prediction interval for the LL, HBY and GBLL model based on 100 simulations
+error_LL_pi_lower <- list()
+error_LL_pi_upper <- list()
+forecasted_mr_LL_pi_lower <- list()
+forecasted_mr_LL_pi_upper <- list()
+
+error_HBY_pi_lower <- list()
+error_HBY_pi_upper <- list()
+forecasted_mr_HBY_pi_lower <- list()
+forecasted_mr_HBY_pi_upper <- list()
+
+error_GBLL_pi_lower <- list()
+error_GBLL_pi_upper <- list()
+forecasted_mr_GBLL_pi_lower <- list()
+forecasted_mr_GBLL_pi_upper <- list()
+
+# LL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  LL_pi_100 <- simulation_pi(30, 4, 52, fitted_results_LL[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, fitted_results_LL[[i]]$gamma, 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_LL_pi_lower[[i]] <- LL_pi_100$lower
+  forecasted_mr_LL_pi_upper[[i]] <- LL_pi_100$upper
+  
+  error_LL_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_lower[[i]], test_mr_list_v3,30,4,12,week_indicator)
+  error_LL_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_LL_pi_upper[[i]], test_mr_list_v3,30,4,12,week_indicator)
+}
+
+# HBY
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  HBY_pi_100 <- simulation_pi(30, 4, 52, fitted_results_HBY[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, c(1,1,1,1,1,1), 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_HBY_pi_lower[[i]] <- HBY_pi_100$lower
+  forecasted_mr_HBY_pi_upper[[i]] <- HBY_pi_100$upper
+  
+  error_HBY_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_HBY_pi_lower[[i]], test_mr_list_v3,30,4,12,week_indicator)
+  error_HBY_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_HBY_pi_upper[[i]], test_mr_list_v3,30,4,12,week_indicator)
+}
+
+# GBLL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  train_regressor <- fourier_regressor(date, training_period[i], 52, 2)$train
+  test_regressor <- fourier_regressor(date, training_period[i], 52, 2)$test
+  
+  GBLL_pi_100 <- simulation_pi(30, 4, 52, fitted_results_GBLL[[i]], train_regressor, test_regressor,
+                             flip_indicator_whole_v3, simulation_iter = 100, fitted_results_GBLL[[i]]$gamma, 
+                             quantile = c(0.025, 0.975), 1019)
+  forecasted_mr_GBLL_pi_lower[[i]] <- GBLL_pi_100$lower
+  forecasted_mr_GBLL_pi_upper[[i]] <- GBLL_pi_100$upper
+  
+  error_GBLL_pi_lower[[i]] <- compute_forecast_error(forecasted_mr_GBLL_pi_lower[[i]], test_mr_list_v3,30,4,12,week_indicator)
+  error_GBLL_pi_upper[[i]] <- compute_forecast_error(forecasted_mr_GBLL_pi_upper[[i]], test_mr_list_v3,30,4,12,week_indicator)
+}
+
+
+
+
+4. To calculate the coverage based on the prediction interval
+total_inside_LL <- 0
+total_inside_HBY <- 0
+total_inside_GBLL <- 0
+
+# LL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_LL_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_LL_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_LL <- total_inside_LL + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_LL <- total_inside_LL/(52*4*30*10)
+
+# HBY
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_HBY_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_HBY_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_HBY <- total_inside_HBY + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_HBY <- total_inside_HBY/(52*4*30*10)
+
+# GBLL
+for(i in 1:10){
+  test_mr_list_v3 <- lapply(mr_list_v3, function(x) as.matrix(x[(training_period[i]+1):(training_period[i]+52),]))
+  for(j in 1:30){
+    lower <- forecasted_mr_GBLL_pi_lower[[i]][[j]]
+    upper <- forecasted_mr_GBLL_pi_upper[[i]][[j]]
+    actual <- test_mr_list_v3[[j]]
+    inside <- (actual >= lower) & (actual <= upper)
+    total_inside_GBLL <- total_inside_GBLL + sum(inside, na.rm = TRUE)
+  }
+}
+total_inside_GBLL <- total_inside_GBLL/(52*4*30*10)
+
+# summary
+df_coverage <- data.frame(Model = c("LL", "HBY", "GBLL"),
+                          Total_Inside = c(total_inside_LL, total_inside_HBY, total_inside_GBLL))
